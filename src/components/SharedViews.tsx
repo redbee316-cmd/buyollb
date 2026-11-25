@@ -47,23 +47,43 @@ export const PageTop: React.FC<{
 
 function isSafeImg(url?: string): boolean {
   if (!url) return false;
-  return url.startsWith('/uploads/') || url.startsWith('data:image/');
+  return (
+    url.startsWith('/uploads/') ||
+    url.startsWith('/assets/') ||
+    url.startsWith('data:image/')
+  );
 }
 
-export const SquareProductImage: React.FC<{ p: Product }> = ({ p }) =>
-  isSafeImg(p.img) ? (
-    <img src={p.img} alt="" style={{ aspectRatio: '1', width: '100%', objectFit: 'cover', display: 'block' }} />
+function resolveImgSrc(url: string): string {
+  if (url.startsWith('/assets/')) {
+    return `${import.meta.env.BASE_URL}${url.slice(1)}`;
+  }
+  return url;
+}
+
+export const SquareProductImage: React.FC<{ p: Product }> = ({ p }) => {
+  const [failed, setFailed] = useState(false);
+  return isSafeImg(p.img) && p.img && !failed ? (
+    <img
+      src={resolveImgSrc(p.img)}
+      alt={p.n}
+      onError={() => setFailed(true)}
+      style={{ aspectRatio: '1', width: '100%', objectFit: 'cover', display: 'block' }}
+    />
   ) : (
     <div className={`pimg ${p.b ? 'b' : ''}`} style={{ aspectRatio: '1', fontSize: '60px', borderRadius: 0 }}>
       {p.e}
     </div>
   );
+};
 
-export const ProductThumb: React.FC<{ p: Product; h?: number; w?: string }> = ({ p, h = 90, w = '100%' }) =>
-  isSafeImg(p.img) ? (
+export const ProductThumb: React.FC<{ p: Product; h?: number; w?: string }> = ({ p, h = 90, w = '100%' }) => {
+  const [failed, setFailed] = useState(false);
+  return isSafeImg(p.img) && p.img && !failed ? (
     <img
-      src={p.img}
-      alt=""
+      src={resolveImgSrc(p.img)}
+      alt={p.n}
+      onError={() => setFailed(true)}
       style={{ height: `${h}px`, width: w, objectFit: 'cover', borderRadius: '12px', flex: 'none' }}
     />
   ) : (
@@ -74,6 +94,7 @@ export const ProductThumb: React.FC<{ p: Product; h?: number; w?: string }> = ({
       {p.e}
     </div>
   );
+};
 
 export const MerchantInitial: React.FC<{ name: string }> = ({ name }) => (
   <span
