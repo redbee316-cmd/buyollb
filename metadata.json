@@ -1,0 +1,6 @@
+{
+  "name": "Buyoll",
+  "description": "Shop Together, Pay Little by Little! Chamaa & Lipa Mdogo Mdogo marketplace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
