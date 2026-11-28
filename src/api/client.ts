@@ -12,8 +12,17 @@ export function getAuthToken(): string | null {
 
 const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
+    'X-Requested-With': 'Buyoll-Client',
     ...(options.headers as Record<string, string> | undefined),
   };
   if (options.body && !headers['Content-Type']) {
@@ -24,10 +33,14 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   }
 
   const targetUrl = url.startsWith('http') ? url : `${API_BASE}${url}`;
-  const res = await fetch(targetUrl, { ...options, headers });
+  const res = await fetch(targetUrl, {
+    ...options,
+    credentials: 'include',
+    headers,
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status})`);
+    throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
   }
   return data as T;
 }
@@ -100,12 +113,43 @@ export const api = {
 
   logout: async () => {
     try {
-      if (memoryToken) {
-        await apiFetch('/api/auth/logout', { method: 'POST' });
-      }
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // clear client memory token even if server is temporarily unreachable
     } finally {
       setAuthToken(null);
     }
+  },
+
+  restoreSession: async (onWakeupRetry?: (attempt: number) => void): Promise<AppState | null> => {
+    const retryDelaysMs = [1000, 2000, 3000, 4000];
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 10000);
+      try {
+        const res = await apiFetch<{ authenticated: boolean; state: AppState }>(
+          '/api/auth/session',
+          { signal: controller.signal }
+        );
+        window.clearTimeout(timeoutId);
+        return res.state;
+      } catch (err) {
+        window.clearTimeout(timeoutId);
+        // Only log out / treat as Guest on a real 401/403 from the server
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          setAuthToken(null);
+          return null;
+        }
+        const isTransientWakeup =
+          !(err instanceof ApiError) || [502, 503, 504].includes(err.status);
+        if (!isTransientWakeup || attempt >= retryDelaysMs.length) {
+          throw err;
+        }
+        onWakeupRetry?.(attempt + 1);
+        await new Promise((resolve) => window.setTimeout(resolve, retryDelaysMs[attempt]));
+      }
+    }
+    return null;
   },
 
   fetchPublicShop: () => apiFetch<{ state: AppState }>('/api/shop').then((r) => r.state),
@@ -284,6 +328,35 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approve }),
     }).then((r) => r.state),
+
+  directDisburseLoan: (
+    id: number,
+    payload: {
+      amount: number;
+      disbursedDate: string;
+      completionDate: string;
+      idempotencyKey: string;
+    }
+  ) =>
+    apiFetch<{
+      disbursement: {
+        loanCode: string;
+        amount: number;
+        commission: number;
+        borrowerCredit: number;
+        lenderBalanceAfter: number;
+        borrowerBalanceAfter: number;
+        adminRevenueAfter: number;
+        idempotentReplay: boolean;
+      };
+      state: AppState;
+    }>(`/api/loans/${id}/direct-disburse`, {
+      method: 'POST',
+      headers: {
+        'Idempotency-Key': payload.idempotencyKey,
+      },
+      body: JSON.stringify(payload),
+    }),
 
   transferLoan: (id: number, amount: number) =>
     apiFetch<{ state: AppState }>(`/api/loans/${id}/transfer`, {

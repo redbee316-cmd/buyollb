@@ -486,7 +486,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
           periodEntries.map((e) => (
             <div key={e.id} className="card">
               <div className="row sp">
-                <b>{categoryLabels[e.category]}</b>
+                <b>{e.source || categoryLabels[e.category]}</b>
                 <b style={{ color: '#16a34a' }}>+{K(e.amount)}</b>
               </div>
               <div className="mu">

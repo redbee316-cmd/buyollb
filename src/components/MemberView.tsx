@@ -58,6 +58,13 @@ interface MemberViewProps {
   onOpenDeposit: () => void;
   onOpenLoanModal: (lenderId: number, pid?: number, gn?: string) => void;
   onDecideLoan?: (id: number, approve: boolean) => void;
+  onDirectDisburseLoan?: (
+    id: number,
+    amount: number,
+    disbursedDate: string,
+    completionDate: string,
+    idempotencyKey: string
+  ) => Promise<void> | void;
   onTransferLoan?: (id: number, amount: number) => void;
   onDisburseLoan?: (id: number, disbursedDate: string, completionDate: string) => void;
   onOpenProductAI: (pid: number) => void;
@@ -92,7 +99,8 @@ export const MemberView: React.FC<MemberViewProps> = ({
   onOpenDeposit,
   onOpenLoanModal,
   onDecideLoan,
-  onTransferLoan,
+  onDirectDisburseLoan,
+  onTransferLoan: _onTransferLoan,
   onDisburseLoan,
   onOpenProductAI,
   onOpenOnboarding,
@@ -111,6 +119,8 @@ export const MemberView: React.FC<MemberViewProps> = ({
   const [disburseDates, setDisburseDates] = React.useState<
     Record<number, { disbursedDate: string; completionDate: string }>
   >({});
+  const [submittingLoanIds, setSubmittingLoanIds] = React.useState<Record<number, boolean>>({});
+  const [loanIdemKeys] = React.useState<Record<number, string>>({});
 
   const prod = (id: number | string | null) => state.products.find((x) => x.id === Number(id));
   const grp = (pid: number | string | null, n: string) => prod(pid)?.g.find((x) => x.n === n);
@@ -393,11 +403,13 @@ export const MemberView: React.FC<MemberViewProps> = ({
         {isLenderReadOnly &&
           groupLoanRequests.map((r) => {
             const rawInput = lenderTransferAmounts[r.id];
-            const transferAmt =
-              rawInput !== undefined && rawInput !== '' ? Math.round(Number(rawInput) || 0) : r.amt;
-            const commission = Math.round(Math.max(0, transferAmt) * 0.05);
+            const parsedInput = rawInput !== undefined && rawInput !== '' ? Number(rawInput) : r.amt;
+            const transferAmt = Number.isFinite(parsedInput) ? Math.floor(Math.max(0, parsedInput)) : r.amt;
+            const commission = Math.floor((transferAmt * 5 + 50) / 100);
             const net = Math.max(0, transferAmt - commission);
-            const hasBalance = state.lw >= transferAmt && transferAmt >= 50;
+            const validAmount = Number.isInteger(transferAmt) && transferAmt >= 50;
+            const hasBalance = validAmount && state.lw >= transferAmt;
+            const isBusy = Boolean(submittingLoanIds[r.id]);
             const isApprovedByMe =
               Boolean(state.currentUserId && r.approvedByUserId === state.currentUserId) ||
               r.lenderName === state.name;
@@ -457,12 +469,14 @@ export const MemberView: React.FC<MemberViewProps> = ({
                       <b>{K(r.borrowerWalletBalance ?? 0)}</b>
                     </div>
                     <div className="row" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '8px' }}>
-                      <div style={{ flex: 1, minWidth: '170px' }}>
+                      <div style={{ flex: 1, minWidth: '150px' }}>
                         <label className="mu" style={{ display: 'block', marginBottom: '2px' }}>
-                          Transfer Amount (KSh)
+                          Disbursement Amount (KSh)
                         </label>
                         <input
                           type="number"
+                          step={1}
+                          min={50}
                           style={{ margin: 0 }}
                           value={rawInput !== undefined ? rawInput : String(r.amt)}
                           onChange={(e) =>
@@ -470,27 +484,120 @@ export const MemberView: React.FC<MemberViewProps> = ({
                           }
                         />
                       </div>
-                      <div className="mu" style={{ flex: 1.3, minWidth: '210px', fontSize: '12px' }}>
-                        Debits Lender Wallet: <b>{K(transferAmt)}</b> · 5% Fee: <b>{K(commission)}</b> ·
-                        Credits Borrower: <b>{K(net)}</b>
+                      <div style={{ flex: 1, minWidth: '140px' }}>
+                        <label className="mu" style={{ display: 'block', marginBottom: '2px' }}>
+                          Disbursement Date
+                        </label>
+                        <input
+                          type="date"
+                          style={{ margin: 0 }}
+                          value={dates.disbursedDate}
+                          onChange={(e) =>
+                            setDisburseDates((prev) => ({
+                              ...prev,
+                              [r.id]: { ...dates, disbursedDate: e.target.value },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div style={{ flex: 1, minWidth: '140px' }}>
+                        <label className="mu" style={{ display: 'block', marginBottom: '2px' }}>
+                          Completion Date
+                        </label>
+                        <input
+                          type="date"
+                          style={{ margin: 0 }}
+                          value={dates.completionDate}
+                          onChange={(e) =>
+                            setDisburseDates((prev) => ({
+                              ...prev,
+                              [r.id]: { ...dates, completionDate: e.target.value },
+                            }))
+                          }
+                        />
                       </div>
                     </div>
-                    <div className="row" style={{ marginTop: '8px', gap: '8px' }}>
+
+                    <div
+                      className="card"
+                      style={{ background: '#fff7ed', borderColor: '#fed7aa', padding: '8px 10px', margin: '8px 0' }}
+                    >
+                      <div className="row sp mu" style={{ fontSize: '12px', padding: '2px 0' }}>
+                        <span>Debits Your Lender Wallet</span>
+                        <b>{K(transferAmt)}</b>
+                      </div>
+                      <div className="row sp mu" style={{ fontSize: '12px', padding: '2px 0' }}>
+                        <span>Credit admin wallet: 5% Platform Commission</span>
+                        <b>{K(commission)}</b>
+                      </div>
+                      <div
+                        className="row sp"
+                        style={{
+                          fontSize: '13px',
+                          padding: '4px 0 0',
+                          marginTop: '4px',
+                          borderTop: '1px solid #fed7aa',
+                        }}
+                      >
+                        <b>Credited to Borrower Wallet</b>
+                        <b style={{ color: '#15803d' }}>{K(net)}</b>
+                      </div>
+                    </div>
+
+                    {validAmount && state.lw < transferAmt && (
+                      <div
+                        className="card"
+                        style={{
+                          background: '#fef2f2',
+                          borderColor: '#fecaca',
+                          color: '#991b1b',
+                          margin: '0 0 8px',
+                          padding: '8px 10px',
+                          fontSize: '12px',
+                        }}
+                      >
+                        Insufficient Lender Wallet balance. Required: <b>{K(transferAmt)}</b> ·
+                        Available: <b>{K(state.lw)}</b>.{' '}
+                        <a
+                          style={{ color: '#b91c1c', fontWeight: 700, textDecoration: 'underline', cursor: 'pointer' }}
+                          onClick={onOpenDeposit}
+                        >
+                          Deposit Funds via M-Pesa →
+                        </a>
+                      </div>
+                    )}
+
+                    <div className="row" style={{ marginTop: '4px', gap: '8px', flexWrap: 'wrap' }}>
                       <button
                         type="button"
                         className="btn y sm"
-                        onClick={() => {
-                          if (!hasBalance) {
-                            onOpenDeposit();
-                            return;
+                        disabled={!hasBalance || isBusy}
+                        onClick={async () => {
+                          if (!hasBalance || isBusy) return;
+                          const idemKey =
+                            loanIdemKeys[r.id] || `disb-${r.id}-${transferAmt}-${Date.now()}`;
+                          loanIdemKeys[r.id] = idemKey;
+                          setSubmittingLoanIds((prev) => ({ ...prev, [r.id]: true }));
+                          try {
+                            await onDirectDisburseLoan?.(
+                              r.id,
+                              transferAmt,
+                              dates.disbursedDate,
+                              dates.completionDate,
+                              idemKey
+                            );
+                          } finally {
+                            setSubmittingLoanIds((prev) => ({ ...prev, [r.id]: false }));
                           }
-                          onTransferLoan?.(r.id, transferAmt);
                         }}
                       >
-                        {hasBalance
-                          ? `💸 Transfer ${K(transferAmt)} to Borrower Wallet`
-                          : `Deposit Funds (${K(transferAmt)} needed)`}
+                        {isBusy ? 'Disbursing...' : 'Disburse to Borrower Wallet'}
                       </button>
+                      {!hasBalance && (
+                        <button type="button" className="btn o sm" onClick={onOpenDeposit}>
+                          Deposit Funds
+                        </button>
+                      )}
                     </div>
                   </>
                 )}

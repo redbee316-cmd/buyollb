@@ -6,6 +6,7 @@ export { PROMO_TIERS, type PromoTierId } from '../src/utils/defaults.ts';
 import type {
   AiInquiry,
   AppState,
+  AuditLogEntry,
   DepositItem,
   GroupMember,
   LenderInfo,
@@ -61,10 +62,22 @@ export interface RoleDatabase<T extends StoredUser = StoredUser> {
   users: T[];
 }
 
+export interface StoredSession {
+  jti: string;
+  userId: string;
+  role: Role;
+  name: string;
+  merchantName?: string;
+  lenderId?: number;
+  createdAt: number;
+  exp: number;
+}
+
 export interface ServerDatabase {
   v: number;
   adminCredential: { salt: string; hash: string; canonicalHash?: string } | null;
   revokedTokens: string[];
+  sessions: Record<string, StoredSession>;
   myByUser: Record<string, MyGroupEntry[]>;
   wishlistByUser: Record<string, number[]>;
   joinRequests: Array<PendingJoinRequest & { userId?: string }>;
@@ -83,6 +96,18 @@ export interface ServerDatabase {
   promoRev: number;
   fee: number;
   revenueLedger: RevenueEntry[];
+  auditLog: AuditLogEntry[];
+  idempotencyKeys: Record<
+    string,
+    {
+      loanRequestId: number;
+      loanCode: string;
+      amount: number;
+      commission: number;
+      netAmount: number;
+      disbursedAt: string;
+    }
+  >;
   usersCount: number;
   hidden: number[];
   feat: number[];
@@ -92,7 +117,9 @@ export interface ServerDatabase {
   banner: string;
 }
 
-export const DATA_DIR = path.resolve(process.cwd(), 'data');
+export const DATA_DIR = process.env.DATA_DIR?.trim()
+  ? path.resolve(process.env.DATA_DIR.trim())
+  : path.resolve(process.cwd(), 'data');
 export const UPLOADS_DIR = path.resolve(DATA_DIR, 'uploads');
 const DB_FILE = path.resolve(DATA_DIR, 'buyoll-db.json');
 const MEMBERS_DB_FILE = path.resolve(DATA_DIR, 'members-db.json');
@@ -244,6 +271,7 @@ function createInitialDb(preserveAdmin?: { salt: string; hash: string; canonical
     v: 5,
     adminCredential: preserveAdmin ?? null,
     revokedTokens: [],
+    sessions: {},
     myByUser: {},
     wishlistByUser: {},
     joinRequests: [],
@@ -266,6 +294,8 @@ function createInitialDb(preserveAdmin?: { salt: string; hash: string; canonical
     promoRev: base.promoRev || 0,
     fee: base.fee,
     revenueLedger: [],
+    auditLog: [],
+    idempotencyKeys: {},
     usersCount: base.users,
     hidden: [],
     feat: base.feat || [],
@@ -403,6 +433,9 @@ export function recordAdminRevenue(
   db: ServerDatabase,
   entry: {
     category: RevenueCategory;
+    source?: string;
+    loanCode?: string;
+    borrowerName?: string;
     amount: number;
     sourceUser: string;
     description: string;
@@ -413,6 +446,9 @@ export function recordAdminRevenue(
   db.revenueLedger.unshift({
     id: `rev-${crypto.randomUUID()}`,
     category: entry.category,
+    source: entry.source,
+    loanCode: entry.loanCode,
+    borrowerName: entry.borrowerName,
     amount: entry.amount,
     sourceUser: entry.sourceUser,
     description: entry.description,
@@ -603,6 +639,9 @@ export function getDb(): ServerDatabase {
           ...createInitialDb(raw.adminCredential),
           ...raw,
           products: normalizedProducts,
+          sessions: raw.sessions || {},
+          auditLog: raw.auditLog || [],
+          idempotencyKeys: raw.idempotencyKeys || {},
           revokedTokens: (raw.revokedTokens || []).slice(-500),
         };
         return dbCache;
@@ -619,6 +658,43 @@ export function getDb(): ServerDatabase {
 export function saveDb() {
   if (!dbCache) return;
   writeJsonAtomic(DB_FILE, dbCache);
+}
+
+export function saveSessionRecord(session: StoredSession) {
+  const db = getDb();
+  db.sessions = db.sessions || {};
+  const now = Date.now();
+  for (const [key, val] of Object.entries(db.sessions)) {
+    if (!val || val.exp < now) {
+      delete db.sessions[key];
+    }
+  }
+  db.sessions[session.jti] = session;
+  saveDb();
+}
+
+export function getSessionRecord(jti: string): StoredSession | undefined {
+  const db = getDb();
+  const entry = db.sessions?.[jti];
+  if (!entry) return undefined;
+  if (entry.exp < Date.now()) {
+    delete db.sessions[jti];
+    saveDb();
+    return undefined;
+  }
+  return entry;
+}
+
+export function deleteSessionRecord(jti: string) {
+  const db = getDb();
+  if (db.sessions && db.sessions[jti]) {
+    delete db.sessions[jti];
+  }
+  db.revokedTokens.push(jti);
+  if (db.revokedTokens.length > 500) {
+    db.revokedTokens = db.revokedTokens.slice(-500);
+  }
+  saveDb();
 }
 
 export function resetDemoDb(keepAdmin = true) {

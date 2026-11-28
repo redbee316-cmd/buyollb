@@ -7,6 +7,7 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import type { AiInquiry, GroupMember, Product, Role } from './src/types/buyoll.ts';
 import { askProductAdvisor } from './server/gemini.ts';
+import { DisbursementError, executeDirectLoanDisbursement } from './server/disbursement.ts';
 import {
   BM,
   K,
@@ -22,6 +23,7 @@ import {
   canViewProductInsights,
   canonicalPassword,
   creditMemberDays,
+  deleteSessionRecord,
   enforceProductGroups,
   ensureDirs,
   findUserByMemberName,
@@ -38,6 +40,7 @@ import {
   getPrivateNotificationsForSession,
   getRoleDb,
   getScopedAiHistory,
+  getSessionRecord,
   hashPassword,
   inst,
   isGroupModerator,
@@ -47,6 +50,7 @@ import {
   resetDemoDb,
   saveDb,
   saveRoleDb,
+  saveSessionRecord,
   validatePasswordReset,
   validateUniqueCredentials,
   verifyPassword,
@@ -67,20 +71,32 @@ interface AuthedRequest extends Request {
 }
 
 const PORT = Number(process.env.PORT) || 3000;
-const SESSION_SECRET =
-  process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_COOKIE_NAME = 'buyoll_session';
+const ENV_SESSION_SECRET = process.env.SESSION_SECRET?.trim();
+if (!ENV_SESSION_SECRET && process.env.NODE_ENV === 'production') {
+  console.warn(
+    '[auth] SESSION_SECRET is not set in environment variables. Set SESSION_SECRET in Render Environment so sessions survive restarts.'
+  );
+}
+const SESSION_SECRET = ENV_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 function signToken(payload: Omit<SessionPayload, 'jti' | 'exp'>): string {
+  const now = Date.now();
   const full: SessionPayload = {
     ...payload,
     jti: crypto.randomUUID(),
-    exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    exp: now + SESSION_TTL_MS,
   };
   const body = Buffer.from(JSON.stringify(full)).toString('base64url');
   const sig = crypto
     .createHmac('sha256', SESSION_SECRET)
     .update(body)
     .digest('base64url');
+  saveSessionRecord({
+    ...full,
+    createdAt: now,
+  });
   return `${body}.${sig}`;
 }
 
@@ -102,6 +118,8 @@ function verifyToken(token: string): SessionPayload | null {
     if (!parsed.exp || parsed.exp < Date.now()) return null;
     const db = getDb();
     if (db.revokedTokens.includes(parsed.jti)) return null;
+    const stored = getSessionRecord(parsed.jti);
+    if (!stored || stored.userId !== parsed.userId || stored.role !== parsed.role) return null;
     return parsed;
   } catch {
     return null;
@@ -156,13 +174,114 @@ function verifyResetToken(token: string): ResetPayload | null {
   }
 }
 
+function parseSessionCookie(req: Request): string | null {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === SESSION_COOKIE_NAME) {
+      const val = part.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(val);
+      } catch {
+        return val;
+      }
+    }
+  }
+  return null;
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const xfProto = req.headers['x-forwarded-proto'];
+  const proto = Array.isArray(xfProto) ? xfProto[0] : xfProto;
+  return Boolean(req.secure || proto === 'https' || process.env.NODE_ENV === 'production');
+}
+
+function setSessionCookie(req: Request, res: Response, token: string) {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const secure = isHttpsRequest(req);
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${maxAgeSec}`,
+    'HttpOnly',
+    secure ? 'Secure' : '',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+    secure ? 'Partitioned' : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+  res.setHeader('Set-Cookie', attrs);
+}
+
+function clearSessionCookie(req: Request, res: Response) {
+  const secure = isHttpsRequest(req);
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    'HttpOnly',
+    secure ? 'Secure' : '',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+    secure ? 'Partitioned' : '',
+  ]
+    .filter(Boolean)
+    .join('; ');
+  res.setHeader('Set-Cookie', attrs);
+}
+
+function buildAllowedOrigins(req: Request): Set<string> {
+  const allowed = new Set<string>();
+  const envList = `${process.env.CORS_ORIGINS || ''},${process.env.APP_URL || ''}`;
+  for (const raw of envList.split(',')) {
+    const clean = raw.trim().replace(/\/$/, '');
+    if (clean) allowed.add(clean);
+  }
+  const xfHost = req.headers['x-forwarded-host'];
+  const host = (Array.isArray(xfHost) ? xfHost[0] : xfHost) || req.headers.host;
+  if (host) {
+    allowed.add(`https://${host}`);
+    if (process.env.NODE_ENV !== 'production') {
+      allowed.add(`http://${host}`);
+    }
+  }
+  if (process.env.NODE_ENV !== 'production') {
+    allowed.add('http://localhost:3000');
+    allowed.add('http://localhost:5173');
+    allowed.add('http://127.0.0.1:3000');
+  }
+  return allowed;
+}
+
+function isOriginAllowed(req: Request, origin: string): boolean {
+  const cleanOrigin = origin.replace(/\/$/, '');
+  return buildAllowedOrigins(req).has(cleanOrigin);
+}
+
 function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) {
+  const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  const cookieToken = !bearerToken ? parseSessionCookie(req) : null;
+  const token = bearerToken || cookieToken || '';
+
+  if (!token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
-  const token = auth.slice(7).trim();
+
+  // CSRF defense on cookie-authenticated state-changing requests
+  if (!bearerToken && cookieToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    const hasCustomHeader = req.headers['x-requested-with'] === 'Buyoll-Client';
+    if (!hasCustomHeader && (!origin || !isOriginAllowed(req, origin))) {
+      res.status(403).json({ error: 'Cross-site request blocked' });
+      return;
+    }
+  }
+
   const payload = verifyToken(token);
   if (!payload) {
     res.status(401).json({ error: 'Invalid or expired session' });
@@ -184,8 +303,10 @@ function requireRole(...roles: Role[]) {
 
 function getOptionalSession(req: Request): SessionPayload | undefined {
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return undefined;
-  return verifyToken(auth.slice(7).trim()) || undefined;
+  const bearerToken = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  const token = bearerToken || parseSessionCookie(req) || '';
+  if (!token) return undefined;
+  return verifyToken(token) || undefined;
 }
 
 function verifyEnvAdminPasscode(submitted: string, envPasscode: string): boolean {
@@ -200,6 +321,30 @@ async function startServer() {
 
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+  app.use((req, res, next) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (origin) {
+      if (isOriginAllowed(req, origin)) {
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader(
+          'Access-Control-Allow-Headers',
+          'Content-Type, Authorization, X-Requested-With, Idempotency-Key'
+        );
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      } else if (req.method === 'OPTIONS') {
+        res.status(403).json({ error: 'Origin not allowed' });
+        return;
+      }
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
   app.use(express.json({ limit: '8mb' }));
 
   // Serve uploaded product images safely
@@ -252,6 +397,7 @@ async function startServer() {
 
     const sessionInfo = { userId: 'usr-admin', role: 'admin' as Role, name: 'Admin' };
     const token = signToken(sessionInfo);
+    setSessionCookie(req, res, token);
     res.json({ token, state: buildClientState(db, sessionInfo) });
   });
 
@@ -277,6 +423,7 @@ async function startServer() {
 
     const sessionInfo = { userId: 'usr-admin', role: 'admin' as Role, name: 'Admin' };
     const token = signToken(sessionInfo);
+    setSessionCookie(req, res, token);
     res.json({ token, state: buildClientState(db, sessionInfo) });
   });
 
@@ -318,6 +465,7 @@ async function startServer() {
       lenderId: user.lenderId,
     };
     const token = signToken(sessionInfo);
+    setSessionCookie(req, res, token);
     res.json({ token, state: buildClientState(db, sessionInfo) });
   });
 
@@ -400,6 +548,7 @@ async function startServer() {
       lenderId: newUser.lenderId,
     };
     const token = signToken(sessionInfo);
+    setSessionCookie(req, res, token);
     res.json({ token, state: buildClientState(db, sessionInfo) });
   });
 
@@ -480,15 +629,17 @@ async function startServer() {
     res.json({ ok: true, username: user.username, role: user.role });
   });
 
-  app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
-    if (req.session) {
-      const db = getDb();
-      db.revokedTokens.push(req.session.jti);
-      if (db.revokedTokens.length > 500) {
-        db.revokedTokens = db.revokedTokens.slice(-500);
-      }
-      saveDb();
+  app.get('/api/auth/session', requireAuth, (req: AuthedRequest, res) => {
+    const db = getDb();
+    res.json({ authenticated: true, state: buildClientState(db, req.session!) });
+  });
+
+  app.post('/api/auth/logout', (req: AuthedRequest, res) => {
+    const session = getOptionalSession(req);
+    if (session) {
+      deleteSessionRecord(session.jti);
     }
+    clearSessionCookie(req, res);
     res.json({ ok: true });
   });
 
@@ -2382,6 +2533,73 @@ async function startServer() {
       saveDb();
       broadcastRealtimeUpdate('loan:approved', { id: r.id });
       res.json({ state: buildClientState(db, session) });
+    }
+  );
+
+  app.post(
+    '/api/loans/:id/direct-disburse',
+    requireAuth,
+    requireRole('lender'),
+    (req: AuthedRequest, res) => {
+      const db = getDb();
+      const session = req.session!;
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) {
+        res.status(400).json({ error: 'Invalid loan request ID', code: 'INVALID_LOAN_ID' });
+        return;
+      }
+
+      const headerIdem =
+        typeof req.headers['idempotency-key'] === 'string'
+          ? req.headers['idempotency-key']
+          : undefined;
+      const bodyIdem =
+        typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey : undefined;
+
+      try {
+        const result = executeDirectLoanDisbursement(
+          {
+            db,
+            lendersDb: getLendersDb(),
+            membersDb: getMembersDb(),
+            persistLenders: () => saveRoleDb('lender'),
+            persistMembers: () => saveRoleDb('member'),
+            persistDb: () => saveDb(),
+          },
+          {
+            loanRequestId: id,
+            session,
+            amount: req.body?.amount !== undefined ? Number(req.body.amount) : undefined,
+            disbursedDate:
+              typeof req.body?.disbursedDate === 'string' ? req.body.disbursedDate : undefined,
+            completionDate:
+              typeof req.body?.completionDate === 'string' ? req.body.completionDate : undefined,
+            idempotencyKey: bodyIdem || headerIdem,
+          }
+        );
+
+        if (!result.idempotentReplay) {
+          broadcastRealtimeUpdate('loan:disbursed', { id, loanCode: result.loanCode });
+        }
+
+        res.json({
+          disbursement: result,
+          state: buildClientState(db, session),
+        });
+      } catch (err) {
+        if (err instanceof DisbursementError) {
+          res.status(err.status).json({
+            error: err.message,
+            code: err.code,
+            ...(err.details || {}),
+          });
+          return;
+        }
+        res.status(500).json({
+          error: 'Loan disbursement failed and all balances were rolled back.',
+          code: 'DISBURSEMENT_FAILED',
+        });
+      }
     }
   );
 

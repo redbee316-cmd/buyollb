@@ -24,12 +24,16 @@ export interface NotificationItem {
 }
 
 export interface TransactionItem {
+  id?: string;
   userId?: string;
   t: string;
   a: number;
   d: string;
   k: 'c' | 'l' | 'p';
   r?: Role;
+  loanCode?: string;
+  entryType?: 'debit' | 'credit';
+  source?: string;
 }
 
 export interface Plan {
@@ -193,6 +197,8 @@ export interface LoanRequest {
   disbursedDate?: string;
   completionDate?: string;
   lenderName?: string;
+  loanCode?: string;
+  idempotencyKey?: string;
 }
 
 export interface LoanItem {
@@ -223,11 +229,30 @@ export type RevenueCategory =
 export interface RevenueEntry {
   id: string;
   category: RevenueCategory;
+  source?: string;
+  loanCode?: string;
+  borrowerName?: string;
   amount: number;
   sourceUser: string;
   description: string;
   timestamp: number;
   dateLabel: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  action: string;
+  actorUserId: string;
+  actorRole: Role;
+  actorName: string;
+  loanRequestId: number;
+  loanCode: string;
+  borrowerName: string;
+  amount: number;
+  commission: number;
+  netAmount: number;
+  idempotencyKey: string;
+  timestamp: string;
 }
 
 export interface LenderInfo {

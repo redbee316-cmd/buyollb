@@ -34,6 +34,7 @@ export default function App() {
   const [onboardingProductId, setOnboardingProductId] = useState<number | null>(null);
   const [priceAlertProductId, setPriceAlertProductId] = useState<number | null>(null);
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => loadPriceAlerts());
+  const [sessionStatus, setSessionStatus] = useState<'checking' | 'waking' | 'ready'>('checking');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -65,19 +66,35 @@ export default function App() {
     []
   );
 
-  // Load live public shop catalog immediately on startup (no login required)
+  // Restore persisted cookie session on startup (retrying while server wakes up), falling back to public shop only on real 401
   useEffect(() => {
     let active = true;
-    api
-      .fetchPublicShop()
-      .then((shopState) => {
+    (async () => {
+      try {
+        const restored = await api.restoreSession(() => {
+          if (active) setSessionStatus('waking');
+        });
+        if (!active) return;
+        if (restored) {
+          syncServerState(restored);
+          return;
+        }
+      } catch {
+        // Transient network/wakeup exhaustion; fall back to public shop without wiping cookie
+      }
+      try {
+        const shopState = await api.fetchPublicShop();
         if (active) {
           syncServerState(shopState);
         }
-      })
-      .catch(() => {
+      } catch {
         // fallback initial shop catalog already displayed
-      });
+      } finally {
+        if (active) setSessionStatus('ready');
+      }
+    })().finally(() => {
+      if (active) setSessionStatus('ready');
+    });
     return () => {
       active = false;
     };
@@ -87,7 +104,8 @@ export default function App() {
   useEffect(() => {
     if (!state.role) return;
     let active = true;
-    const es = new EventSource('/api/events');
+    const eventsUrl = `${(import.meta.env.VITE_API_URL || '').replace(/\/$/, '')}/api/events`;
+    const es = new EventSource(eventsUrl, { withCredentials: true });
     es.onmessage = (event) => {
       if (!active) return;
       try {
@@ -497,6 +515,32 @@ export default function App() {
     [showToast, syncServerState]
   );
 
+  const handleDirectDisburseLoan = useCallback(
+    async (
+      id: number,
+      amount: number,
+      disbursedDate: string,
+      completionDate: string,
+      idempotencyKey: string
+    ) => {
+      try {
+        const res = await api.directDisburseLoan(id, {
+          amount,
+          disbursedDate,
+          completionDate,
+          idempotencyKey,
+        });
+        syncServerState(res.state);
+        showToast(
+          `Loan ${res.disbursement.loanCode} disbursed! Credited ${K(res.disbursement.borrowerCredit)} to borrower · New wallet balance: ${K(res.disbursement.lenderBalanceAfter)}`
+        );
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Direct disbursement failed');
+      }
+    },
+    [showToast, syncServerState]
+  );
+
   const handleTransferLoan = useCallback(
     async (id: number, amount: number) => {
       try {
@@ -674,6 +718,23 @@ export default function App() {
       />
 
       <main>
+        {sessionStatus !== 'ready' && (
+          <div
+            className="card mu"
+            style={{
+              margin: '0 0 10px',
+              padding: '8px 12px',
+              fontSize: '12px',
+              background: '#fff7ed',
+              borderColor: '#fed7aa',
+              color: '#9a3412',
+            }}
+          >
+            {sessionStatus === 'waking'
+              ? 'Server is waking up — restoring your session...'
+              : 'Checking your session...'}
+          </div>
+        )}
         {(state.role === null ||
           state.role === 'member' ||
           state.view === 'prod' ||
@@ -710,6 +771,9 @@ export default function App() {
               setModal({ type: 'loan', lenderId, pid, gn })
             }
             onDecideLoan={(id, approve) => void handleDecideLoan(id, approve)}
+            onDirectDisburseLoan={(id, amount, disbursedDate, completionDate, idempotencyKey) =>
+              handleDirectDisburseLoan(id, amount, disbursedDate, completionDate, idempotencyKey)
+            }
             onTransferLoan={(id, amount) => void handleTransferLoan(id, amount)}
             onDisburseLoan={(id, disbursedDate, completionDate) =>
               void handleDisburseLoan(id, disbursedDate, completionDate)
@@ -760,6 +824,9 @@ export default function App() {
             onGo={go}
             onOpenDeposit={() => setModal({ type: 'deposit' })}
             onDecideLoan={(id, approve) => void handleDecideLoan(id, approve)}
+            onDirectDisburseLoan={(id, amount, disbursedDate, completionDate, idempotencyKey) =>
+              handleDirectDisburseLoan(id, amount, disbursedDate, completionDate, idempotencyKey)
+            }
             onTransferLoan={(id, amount) => void handleTransferLoan(id, amount)}
             onDisburseLoan={(id, disbursedDate, completionDate) =>
               void handleDisburseLoan(id, disbursedDate, completionDate)
