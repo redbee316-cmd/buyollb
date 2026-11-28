@@ -1,5 +1,5 @@
 import React from 'react';
-import { Bell, BellRing, Heart, HelpCircle, Search, Sparkles } from 'lucide-react';
+import { Bell, BellRing, HandCoins, Heart, HelpCircle, Search, Sparkles } from 'lucide-react';
 import { LN } from '../utils/defaults';
 import { MemberPaymentProgressChart } from './MemberPaymentProgressChart';
 import type { AppState, MyGroupEntry, Product, ProductGroup, Tab } from '../types/buyoll';
@@ -56,8 +56,10 @@ interface MemberViewProps {
   onRotateGroup: (pid: number, gn: string) => void;
   onCopyLedger: (pid: number, gn: string) => void;
   onOpenDeposit: () => void;
-  onOpenLoanModal: (lenderId: number) => void;
-  onDecideLoan?: (id: number, approve: boolean, amount?: number) => void;
+  onOpenLoanModal: (lenderId: number, pid?: number, gn?: string) => void;
+  onDecideLoan?: (id: number, approve: boolean) => void;
+  onTransferLoan?: (id: number, amount: number) => void;
+  onDisburseLoan?: (id: number, disbursedDate: string, completionDate: string) => void;
   onOpenProductAI: (pid: number) => void;
   onOpenOnboarding: (pid: number) => void;
   priceAlerts?: PriceAlert[];
@@ -90,6 +92,8 @@ export const MemberView: React.FC<MemberViewProps> = ({
   onOpenDeposit,
   onOpenLoanModal,
   onDecideLoan,
+  onTransferLoan,
+  onDisburseLoan,
   onOpenProductAI,
   onOpenOnboarding,
   priceAlerts = [],
@@ -104,6 +108,9 @@ export const MemberView: React.FC<MemberViewProps> = ({
   const [rulesDraft, setRulesDraft] = React.useState('');
   const [editingRulesKey, setEditingRulesKey] = React.useState<string | null>(null);
   const [lenderTransferAmounts, setLenderTransferAmounts] = React.useState<Record<number, string>>({});
+  const [disburseDates, setDisburseDates] = React.useState<
+    Record<number, { disbursedDate: string; completionDate: string }>
+  >({});
 
   const prod = (id: number | string | null) => state.products.find((x) => x.id === Number(id));
   const grp = (pid: number | string | null, n: string) => prod(pid)?.g.find((x) => x.n === n);
@@ -333,8 +340,20 @@ export const MemberView: React.FC<MemberViewProps> = ({
       (jr) => jr.pid === p.id && jr.gn === gn && jr.st === 'pending'
     );
     const groupLoanRequests = isLenderReadOnly
-      ? state.lr.filter((r) => r.st === 'pending' && r.pid === p.id && r.gn === gn)
+      ? state.lr.filter(
+          (r) =>
+            r.pid === p.id &&
+            r.gn === gn &&
+            ['pending', 'approved', 'transferred', 'disbursed'].includes(r.st) &&
+            !(r.st === 'pending' && state.currentUserId && r.declinedBy?.includes(state.currentUserId))
+        )
       : [];
+    const myGroupLoanReqs = isMemberInGroup
+      ? state.lr.filter((r) => r.me && r.pid === p.id && r.gn === gn)
+      : [];
+    const myActiveLoan = state.loans.find(
+      (l) => l.st === 'Active' && (l.who === state.name || (state.memberCode && l.memberCode === state.memberCode))
+    );
     const allCompletedAllRounds =
       g.r.length === g.c && g.r.every((x) => getMemberTracking(x, g.c).completedAll);
     const allCurrentRoundDone =
@@ -379,6 +398,15 @@ export const MemberView: React.FC<MemberViewProps> = ({
             const commission = Math.round(Math.max(0, transferAmt) * 0.05);
             const net = Math.max(0, transferAmt - commission);
             const hasBalance = state.lw >= transferAmt && transferAmt >= 50;
+            const isApprovedByMe =
+              Boolean(state.currentUserId && r.approvedByUserId === state.currentUserId) ||
+              r.lenderName === state.name;
+            const todayIso = new Date().toISOString().slice(0, 10);
+            const plus30Iso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+            const dates = disburseDates[r.id] || {
+              disbursedDate: r.disbursedDate || todayIso,
+              completionDate: r.completionDate || plus30Iso,
+            };
 
             return (
               <div
@@ -388,67 +416,137 @@ export const MemberView: React.FC<MemberViewProps> = ({
               >
                 <div className="row sp" style={{ flexWrap: 'wrap', gap: '6px' }}>
                   <div>
-                    <b>
-                      💸 Link Wallets &amp; Transfer Loan to {r.by}
-                    </b>{' '}
+                    <b>Borrower: {r.by}</b>{' '}
                     <span className="bd p">{r.memberCode || 'BUY-M-000'}</span>
                   </div>
                   <b style={{ color: '#e62e04' }}>Requested: {K(r.amt)}</b>
                 </div>
                 <div className="mu" style={{ marginTop: '4px', lineHeight: 1.5 }}>
-                  📞 Borrower Phone (KYC outside Buyoll): <b>{r.phone || 'Not provided'}</b>
-                  <br />
-                  🔗 Linked Wallets: <b>Your Lender Wallet ({K(state.lw)})</b> ➔{' '}
-                  <b>
-                    {r.by}&apos;s Member Wallet ({r.memberCode || 'Member'})
-                  </b>
+                  📞 Phone (discuss terms &amp; interest outside Buyoll): <b>{r.phone || 'Not provided'}</b>
                 </div>
-                <div className="row" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '8px' }}>
-                  <div style={{ flex: 1, minWidth: '170px' }}>
-                    <label className="mu" style={{ display: 'block', marginBottom: '2px' }}>
-                      Agreed Transfer Loan Amount (KSh)
-                    </label>
-                    <input
-                      type="number"
-                      style={{ margin: 0 }}
-                      value={rawInput !== undefined ? rawInput : String(r.amt)}
-                      onChange={(e) =>
-                        setLenderTransferAmounts((prev) => ({ ...prev, [r.id]: e.target.value }))
-                      }
-                    />
+
+                {r.st === 'pending' && (
+                  <div className="row" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn y sm"
+                      onClick={() => onDecideLoan?.(r.id, true)}
+                    >
+                      ✔ Approve Loan
+                    </button>
+                    <button
+                      type="button"
+                      className="btn o sm"
+                      onClick={() => onDecideLoan?.(r.id, false)}
+                    >
+                      Decline
+                    </button>
                   </div>
-                  <div className="mu" style={{ flex: 1.3, minWidth: '210px', fontSize: '12px' }}>
-                    Debits Lender Wallet: <b>{K(transferAmt)}</b>
-                    <br />
-                    5% Commission to Admin (once): <b>{K(commission)}</b>
-                    <br />
-                    Credited to Borrower Wallet: <b>{K(net)}</b> (active group installments only)
+                )}
+
+                {r.st === 'approved' && !isApprovedByMe && (
+                  <div className="mu" style={{ marginTop: '8px', color: '#b45309', fontWeight: 700 }}>
+                    🔒 Approved by {r.lenderName || 'another lender'} — locked against double lending.
                   </div>
-                </div>
-                <div className="row" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '8px' }}>
-                  <button
-                    type="button"
-                    className="btn y sm"
-                    onClick={() => {
-                      if (!hasBalance) {
-                        onOpenDeposit();
-                        return;
-                      }
-                      onDecideLoan?.(r.id, true, transferAmt);
-                    }}
-                  >
-                    {hasBalance
-                      ? `💸 Transfer ${K(transferAmt)} Loan Amount`
-                      : `Deposit Coins (${K(transferAmt)} needed)`}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn o sm"
-                    onClick={() => onDecideLoan?.(r.id, false)}
-                  >
-                    Decline
-                  </button>
-                </div>
+                )}
+
+                {r.st === 'approved' && isApprovedByMe && (
+                  <>
+                    <div className="mu" style={{ marginTop: '6px' }}>
+                      💳 Borrower Wallet: <b>{r.by} ({r.memberCode})</b> · Current Balance:{' '}
+                      <b>{K(r.borrowerWalletBalance ?? 0)}</b>
+                    </div>
+                    <div className="row" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '8px' }}>
+                      <div style={{ flex: 1, minWidth: '170px' }}>
+                        <label className="mu" style={{ display: 'block', marginBottom: '2px' }}>
+                          Transfer Amount (KSh)
+                        </label>
+                        <input
+                          type="number"
+                          style={{ margin: 0 }}
+                          value={rawInput !== undefined ? rawInput : String(r.amt)}
+                          onChange={(e) =>
+                            setLenderTransferAmounts((prev) => ({ ...prev, [r.id]: e.target.value }))
+                          }
+                        />
+                      </div>
+                      <div className="mu" style={{ flex: 1.3, minWidth: '210px', fontSize: '12px' }}>
+                        Debits Lender Wallet: <b>{K(transferAmt)}</b> · 5% Fee: <b>{K(commission)}</b> ·
+                        Credits Borrower: <b>{K(net)}</b>
+                      </div>
+                    </div>
+                    <div className="row" style={{ marginTop: '8px', gap: '8px' }}>
+                      <button
+                        type="button"
+                        className="btn y sm"
+                        onClick={() => {
+                          if (!hasBalance) {
+                            onOpenDeposit();
+                            return;
+                          }
+                          onTransferLoan?.(r.id, transferAmt);
+                        }}
+                      >
+                        {hasBalance
+                          ? `💸 Transfer ${K(transferAmt)} to Borrower Wallet`
+                          : `Deposit Funds (${K(transferAmt)} needed)`}
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {r.st === 'transferred' && isApprovedByMe && (
+                  <div style={{ marginTop: '8px' }}>
+                    <div className="mu" style={{ color: '#166534', fontWeight: 700 }}>
+                      ✔ {K(r.disbursedAmt || r.amt)} transferred to {r.by}&apos;s wallet. Confirm disbursement dates:
+                    </div>
+                    <div className="row" style={{ gap: '8px', marginTop: '6px', flexWrap: 'wrap' }}>
+                      <div style={{ flex: 1, minWidth: '140px' }}>
+                        <label className="mu">Disbursed Date</label>
+                        <input
+                          type="date"
+                          style={{ margin: 0 }}
+                          value={dates.disbursedDate}
+                          onChange={(e) =>
+                            setDisburseDates((prev) => ({
+                              ...prev,
+                              [r.id]: { ...dates, disbursedDate: e.target.value },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div style={{ flex: 1, minWidth: '140px' }}>
+                        <label className="mu">Completion Date</label>
+                        <input
+                          type="date"
+                          style={{ margin: 0 }}
+                          value={dates.completionDate}
+                          onChange={(e) =>
+                            setDisburseDates((prev) => ({
+                              ...prev,
+                              [r.id]: { ...dates, completionDate: e.target.value },
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      style={{ marginTop: '8px' }}
+                      onClick={() => onDisburseLoan?.(r.id, dates.disbursedDate, dates.completionDate)}
+                    >
+                      ✅ Loan Disbursed
+                    </button>
+                  </div>
+                )}
+
+                {r.st === 'disbursed' && (
+                  <div className="mu" style={{ marginTop: '8px', color: '#166534', fontWeight: 700 }}>
+                    ✅ Loan of {K(r.disbursedAmt || r.amt)} disbursed on {r.disbursedDate} by{' '}
+                    {r.lenderName} · Completes on {r.completionDate}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -480,6 +578,60 @@ export const MemberView: React.FC<MemberViewProps> = ({
             {im ? ' · you manage rules, referrals & payment adherence' : ''}
           </div>
         </div>
+
+        {state.role === 'member' && isMemberInGroup && (
+          <div
+            className="card"
+            style={{ background: '#fffaf5', borderColor: '#fed7aa', marginBottom: '10px' }}
+          >
+            <div className="row sp" style={{ flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ flex: 1, minWidth: '210px' }}>
+                <b>Need help covering daily installments?</b>
+                <div className="mu" style={{ marginTop: '2px' }}>
+                  Post a loan request directly from Payment Tracking to Buyoll&apos;s live Lender
+                  Dashboard.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn y sm"
+                disabled={Boolean(myActiveLoan)}
+                onClick={() => onOpenLoanModal(0, p.id, gn)}
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                <HandCoins size={15} />
+                <span>Post a Loan Request</span>
+              </button>
+            </div>
+            {(myActiveLoan || myGroupLoanReqs.length > 0) && (
+              <div style={{ marginTop: '8px', borderTop: '1px solid #fed7aa', paddingTop: '6px' }}>
+                {myActiveLoan && (
+                  <div className="mu" style={{ color: '#9a3412', fontWeight: 700 }}>
+                    Active Loan: {K(myActiveLoan.amt)} from {myActiveLoan.lenderName || 'Lender'}
+                    {myActiveLoan.disbursedDate ? ` · Disbursed ${myActiveLoan.disbursedDate}` : ''}
+                    {myActiveLoan.completionDate ? ` · Completes ${myActiveLoan.completionDate}` : ''}
+                  </div>
+                )}
+                {myGroupLoanReqs.slice(0, 2).map((req) => (
+                  <div key={req.id} className="mu" style={{ marginTop: '2px' }}>
+                    Request {K(req.amt)} ({req.memberCode}) · Status:{' '}
+                    <b>
+                      {req.st === 'pending'
+                        ? 'Waiting for lender'
+                        : req.st === 'approved'
+                          ? `Approved by ${req.lenderName}`
+                          : req.st === 'transferred'
+                            ? `Transferred by ${req.lenderName}`
+                            : req.st === 'disbursed'
+                              ? `Disbursed on ${req.disbursedDate} (Completes ${req.completionDate})`
+                              : req.st}
+                    </b>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Group Rules & Moderator Governance */}
         <div className="card" style={{ background: '#fffaf5', borderColor: '#fed7aa' }}>

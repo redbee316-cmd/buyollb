@@ -492,6 +492,44 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // ---------- REAL-TIME SSE STREAM ----------
+
+  const sseClients = new Set<Response>();
+
+  function broadcastRealtimeUpdate(type: string, meta?: Record<string, unknown>) {
+    const payload = `data: ${JSON.stringify({ type, ts: Date.now(), ...(meta || {}) })}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(payload);
+      } catch {
+        sseClients.delete(client);
+      }
+    }
+  }
+
+  app.get('/api/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    res.write(`data: ${JSON.stringify({ type: 'connected', ts: Date.now() })}\n\n`);
+    sseClients.add(res);
+
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(keepAlive);
+        sseClients.delete(res);
+      }
+    }, 25000);
+
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+    });
+  });
+
   // ---------- STATE SYNC ----------
 
   app.get('/api/shop', (_req, res) => {
@@ -2073,7 +2111,49 @@ async function startServer() {
     }
   );
 
-  // ---------- LOANS (GLOBAL LENDER BOARD + 5% AUTO COMMISSION) ----------
+  // ---------- LOANS (GLOBAL LENDER BOARD + ANTI-DOUBLE-LENDING WORKFLOW) ----------
+
+  function findActiveBorrowerLock(
+    db: ReturnType<typeof getDb>,
+    borrower: { userId?: string; name: string; memberCode?: string },
+    excludeRequestId?: number
+  ): { lenderName: string; status: string; amount?: number; completionDate?: string } | null {
+    const normName = borrower.name.trim().toLowerCase();
+    const normCode = (borrower.memberCode || '').trim().toLowerCase();
+
+    const activeLoan = db.loans.find((l) => {
+      if (l.st !== 'Active') return false;
+      const matchesCode = normCode && l.memberCode && l.memberCode.toLowerCase() === normCode;
+      const matchesName = l.who.trim().toLowerCase() === normName;
+      return matchesCode || matchesName;
+    });
+    if (activeLoan) {
+      return {
+        lenderName: activeLoan.lenderName || 'another lender',
+        status: 'disbursed',
+        amount: activeLoan.amt,
+        completionDate: activeLoan.completionDate,
+      };
+    }
+
+    const activeReq = db.lr.find((reqItem) => {
+      if (excludeRequestId && reqItem.id === excludeRequestId) return false;
+      if (reqItem.st !== 'approved' && reqItem.st !== 'transferred') return false;
+      const matchesUser = borrower.userId && reqItem.userId && reqItem.userId === borrower.userId;
+      const matchesCode = normCode && reqItem.memberCode && reqItem.memberCode.toLowerCase() === normCode;
+      const matchesName = reqItem.by.trim().toLowerCase() === normName;
+      return Boolean(matchesUser || matchesCode || matchesName);
+    });
+    if (activeReq) {
+      return {
+        lenderName: activeReq.lenderName || 'another lender',
+        status: activeReq.st,
+        amount: activeReq.disbursedAmt || activeReq.amt,
+      };
+    }
+
+    return null;
+  }
 
   app.post('/api/loans/request', requireAuth, requireRole('member'), (req: AuthedRequest, res) => {
     const db = getDb();
@@ -2084,6 +2164,8 @@ async function startServer() {
     const reqPid = req.body?.pid ? Number(req.body.pid) : undefined;
     const reqGn = typeof req.body?.gn === 'string' ? req.body.gn.trim() : undefined;
     const reqPhone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+    const reqName = typeof req.body?.memberName === 'string' ? req.body.memberName.trim() : '';
+    const reqCode = typeof req.body?.memberCode === 'string' ? req.body.memberCode.trim().toUpperCase() : '';
 
     if (!Number.isFinite(amt) || amt <= 50) {
       res.status(400).json({ error: 'Enter a loan amount above KSh 50' });
@@ -2092,14 +2174,37 @@ async function startServer() {
 
     const membersDb = getMembersDb();
     const memberUser = membersDb.users.find((u) => u.id === session.userId);
+    const borrowerName = reqName || session.name;
     const phone = reqPhone || memberUser?.phone || '';
     if (!phone || phone.length < 7) {
-      res.status(400).json({ error: 'Enter your phone number so lenders can verify KYC with you' });
+      res.status(400).json({ error: 'Enter your mobile number so lenders can contact you' });
       return;
     }
-    if (memberUser && !memberUser.phone) {
-      memberUser.phone = phone;
-      saveRoleDb('member');
+    const memberCode = reqCode || memberUser?.memberCode || 'BUY-M-001';
+
+    if (memberUser) {
+      let changed = false;
+      if (!memberUser.phone) {
+        memberUser.phone = phone;
+        changed = true;
+      }
+      if (!memberUser.memberCode && reqCode) {
+        memberUser.memberCode = reqCode;
+        changed = true;
+      }
+      if (changed) saveRoleDb('member');
+    }
+
+    const activeLock = findActiveBorrowerLock(db, {
+      userId: session.userId,
+      name: borrowerName,
+      memberCode,
+    });
+    if (activeLock) {
+      res.status(400).json({
+        error: `You already have an active loan (${activeLock.status}) with ${activeLock.lenderName}. Complete it before requesting another loan.`,
+      });
+      return;
     }
 
     const activeMy = (db.myByUser[session.userId] || []).filter((m) => m.st === 'ok');
@@ -2118,12 +2223,17 @@ async function startServer() {
 
     const groupProduct = db.products.find((p) => p.id === chosenGroup!.pid);
     const groupLabel = `${groupProduct?.n || 'Product'} · Group ${chosenGroup.g}`;
-    const memberCode = memberUser?.memberCode || 'BUY-M-001';
+    const createdAt = new Date().toLocaleString('en-KE', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
 
     db.lr.unshift({
       id: Date.now(),
       userId: session.userId,
-      by: session.name,
+      by: borrowerName,
       memberCode,
       phone,
       me: 1,
@@ -2132,29 +2242,31 @@ async function startServer() {
       pid: chosenGroup.pid,
       gn: chosenGroup.g,
       st: 'pending',
+      declinedBy: [],
       ctx: ctx || groupLabel,
       score: 700,
       loc: 'Nairobi',
+      createdAt,
     });
 
-    // Notify all registered lenders globally so any lender sees the request
     const allLenders = getLendersDb().users;
     for (const lu of allLenders) {
       pushPrivateNote(db, {
         r: 'lender',
         userId: lu.id,
         category: 'loan',
-        t: `Global Loan Request: ${session.name} (${memberCode} · ${phone}) requested ${K(amt)} for ${groupLabel}. Inspect group & transfer from Lender Dashboard.`,
+        t: `New Loan Request: ${borrowerName} (${memberCode} · ${phone}) requested ${K(amt)} for ${groupLabel}.`,
       });
     }
     pushPrivateNote(db, {
       r: 'member',
       userId: session.userId,
       category: 'loan',
-      t: `Loan request of ${K(amt)} (${memberCode}) posted to all Buyoll lenders for ${groupLabel}.`,
+      t: `Loan request of ${K(amt)} (${memberCode}) posted to the Lender Dashboard for ${groupLabel}.`,
     });
 
     saveDb();
+    broadcastRealtimeUpdate('loan:requested', { pid: chosenGroup.pid, gn: chosenGroup.g });
     res.json({ state: buildClientState(db, session) });
   });
 
@@ -2167,11 +2279,19 @@ async function startServer() {
       const session = req.session!;
       const id = Number(req.params.id);
       const approve = Boolean(req.body?.approve);
-      const requestedTransfer = Number(req.body?.amount);
 
       const r = db.lr.find((x) => x.id === id);
-      if (!r || r.st !== 'pending') {
-        res.status(404).json({ error: 'Pending loan request not found or already disbursed' });
+      if (!r) {
+        res.status(404).json({ error: 'Loan request not found' });
+        return;
+      }
+      if (r.st !== 'pending') {
+        res.status(409).json({
+          error:
+            r.st === 'approved' || r.st === 'transferred' || r.st === 'disbursed'
+              ? `Already approved by ${r.lenderName || 'another lender'}. Only one lender can lend to a borrower at a time.`
+              : 'Loan request is no longer pending.',
+        });
         return;
       }
 
@@ -2181,33 +2301,46 @@ async function startServer() {
         findUserByMemberName(r.by);
 
       if (!approve) {
-        r.st = 'declined';
-        pushPrivateNote(db, {
-          r: 'member',
-          userId: targetMemberUser?.id,
-          category: 'loan',
-          t: `Lender ${session.name} declined your ${K(r.amt)} loan request.`,
-        });
         if (session.role === 'lender') {
+          const declinedSet = new Set(r.declinedBy || []);
+          declinedSet.add(session.userId);
+          r.declinedBy = Array.from(declinedSet);
+
+          pushPrivateNote(db, {
+            r: 'member',
+            userId: targetMemberUser?.id,
+            category: 'loan',
+            t: `Lender ${session.name} declined your ${K(r.amt)} loan request. Your request remains open for the next available lender.`,
+          });
           pushPrivateNote(db, {
             r: 'lender',
             userId: session.userId,
             category: 'loan',
-            t: `You declined ${r.by} (${r.memberCode || 'Member'})'s loan request of ${K(r.amt)}.`,
+            t: `You declined ${r.by} (${r.memberCode || 'Member'})'s ${K(r.amt)} loan request. Other lenders may still contact them.`,
           });
+        } else {
+          r.st = 'declined';
         }
         saveDb();
+        broadcastRealtimeUpdate('loan:declined', { id: r.id });
         res.json({ state: buildClientState(db, session) });
         return;
       }
 
-      const transferAmt =
-        Number.isFinite(requestedTransfer) && requestedTransfer > 0
-          ? Math.round(requestedTransfer)
-          : r.amt;
-
-      if (transferAmt < 50) {
-        res.status(400).json({ error: 'Transfer amount must be at least KSh 50' });
+      // Enforce single-lender-at-a-time anti-double-lending lock
+      const existingLock = findActiveBorrowerLock(
+        db,
+        {
+          userId: r.userId || targetMemberUser?.id,
+          name: r.by,
+          memberCode: r.memberCode || targetMemberUser?.memberCode,
+        },
+        r.id
+      );
+      if (existingLock) {
+        res.status(409).json({
+          error: `Double-lending blocked: ${r.by} already has an active loan (${existingLock.status}) with ${existingLock.lenderName}.`,
+        });
         return;
       }
 
@@ -2217,6 +2350,75 @@ async function startServer() {
           ? lendersDb.users.find((u) => u.id === session.userId)
           : lendersDb.users.find((u) => (u.lenderId || 1) === (r.lender || 1)) || lendersDb.users[0];
 
+      r.st = 'approved';
+      r.approvedByUserId = lenderUser?.id || session.userId;
+      r.lender = lenderUser?.lenderId || ME;
+      r.lenderName = lenderUser?.name || session.name;
+      r.approvedAt = new Date().toLocaleString('en-KE', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      pushPrivateNote(db, {
+        r: 'member',
+        userId: targetMemberUser?.id,
+        category: 'loan',
+        t: `Loan Approved by ${r.lenderName}! The lender now has access to transfer your agreed amount into your Buyoll Member Wallet.`,
+      });
+      for (const lu of lendersDb.users) {
+        if (lu.id !== r.approvedByUserId) {
+          pushPrivateNote(db, {
+            r: 'lender',
+            userId: lu.id,
+            category: 'loan',
+            t: `Borrower Locked: ${r.by} (${r.memberCode || 'Member'})'s loan was approved by ${r.lenderName}. Do not double-lend.`,
+          });
+        }
+      }
+
+      saveDb();
+      broadcastRealtimeUpdate('loan:approved', { id: r.id });
+      res.json({ state: buildClientState(db, session) });
+    }
+  );
+
+  app.post(
+    '/api/loans/:id/transfer',
+    requireAuth,
+    requireRole('lender', 'admin'),
+    (req: AuthedRequest, res) => {
+      const db = getDb();
+      const session = req.session!;
+      const id = Number(req.params.id);
+      const requestedTransfer = Math.round(Number(req.body?.amount));
+
+      const r = db.lr.find((x) => x.id === id);
+      if (!r || r.st !== 'approved') {
+        res.status(404).json({ error: 'Approved loan awaiting transfer was not found' });
+        return;
+      }
+      if (session.role === 'lender' && r.approvedByUserId && r.approvedByUserId !== session.userId) {
+        res.status(403).json({
+          error: `Only ${r.lenderName || 'the approving lender'} can transfer funds for this loan.`,
+        });
+        return;
+      }
+
+      const transferAmt = Number.isFinite(requestedTransfer) && requestedTransfer > 0 ? requestedTransfer : r.amt;
+      if (transferAmt < 50) {
+        res.status(400).json({ error: 'Transfer amount must be at least KSh 50' });
+        return;
+      }
+
+      const lendersDb = getLendersDb();
+      const lenderUser =
+        session.role === 'lender'
+          ? lendersDb.users.find((u) => u.id === session.userId)
+          : lendersDb.users.find((u) => u.id === r.approvedByUserId) || lendersDb.users[0];
+
       if (!lenderUser || lenderUser.wallet < transferAmt) {
         res.status(400).json({
           error: `Insufficient lender wallet balance (${K(transferAmt)} required). Deposit funds via M-Pesa first.`,
@@ -2224,56 +2426,49 @@ async function startServer() {
         return;
       }
 
+      const membersDb = getMembersDb();
+      const memberUser =
+        (r.userId ? membersDb.users.find((u) => u.id === r.userId) : undefined) ||
+        findUserByMemberName(r.by) ||
+        membersDb.users[0];
+
       lenderUser.wallet -= transferAmt;
       saveRoleDb('lender');
 
-      // Deduct 5% platform commission strictly once per loan disbursed
       const commission = Math.round(transferAmt * 0.05);
       const net = transferAmt - commission;
       db.rev += commission;
       db.fee = (db.fee || 0) + commission;
-      db.lent += transferAmt;
-      r.st = 'approved';
-      r.disbursedAmt = transferAmt;
-      r.commissionAmt = commission;
-      r.netAmt = net;
-      r.lender = lenderUser.lenderId || ME;
-      r.lenderName = lenderUser.name;
 
-      recordAdminRevenue(db, {
-        category: 'loan_commission',
-        amount: commission,
-        sourceUser: `${r.by} (${r.memberCode || targetMemberUser?.memberCode || 'BUY-M'})`,
-        description: `5% Loan Commission on ${K(transferAmt)} disbursed by ${lenderUser.name}`,
-      });
-
-      const loanRecordId = `#LN-${String(db.loans.length + 1).padStart(3, '0')}`;
-      db.loans.unshift({
-        id: loanRecordId,
-        amt: transferAmt,
-        commissionAmt: commission,
-        netAmt: net,
-        st: 'Active',
-        lender: lenderUser.lenderId || ME,
-        lenderName: lenderUser.name,
-        who: r.by,
-        memberCode: r.memberCode || targetMemberUser?.memberCode,
-        phone: r.phone || targetMemberUser?.phone,
-        pid: r.pid,
-        gn: r.gn,
-      });
-
-      const memberUser = targetMemberUser || membersDb.users[0];
       if (memberUser) {
         memberUser.wallet += net;
         memberUser.loanCredit = (memberUser.loanCredit || 0) + net;
         saveRoleDb('member');
       }
 
+      r.st = 'transferred';
+      r.disbursedAmt = transferAmt;
+      r.commissionAmt = commission;
+      r.netAmt = net;
+      r.transferredAt = new Date().toLocaleString('en-KE', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      recordAdminRevenue(db, {
+        category: 'loan_commission',
+        amount: commission,
+        sourceUser: `${r.by} (${r.memberCode || memberUser?.memberCode || 'BUY-M'})`,
+        description: `5% Loan Commission on ${K(transferAmt)} transferred by ${lenderUser.name}`,
+      });
+
       db.tx.unshift(
         {
           userId: memberUser?.id,
-          t: `Loan Disbursed by ${lenderUser.name} (${K(transferAmt)} less 5% fee ${K(commission)})`,
+          t: `Loan Transfer from ${lenderUser.name} (${K(transferAmt)} less 5% fee ${K(commission)})`,
           a: net,
           d: 'Just now',
           k: 'l',
@@ -2293,22 +2488,142 @@ async function startServer() {
         r: 'member',
         userId: memberUser?.id,
         category: 'loan',
-        t: `Loan transferred by ${lenderUser.name}: ${K(net)} credited to your wallet (${K(commission)} 5% fee deducted once). Borrowed funds can only pay installments in your active groups.`,
+        t: `${K(net)} transferred by ${lenderUser.name} into your Member Wallet (${K(commission)} 5% fee deducted once). Repayment follows your agreed off-platform terms.`,
       });
       pushPrivateNote(db, {
         r: 'lender',
         userId: lenderUser.id,
         category: 'loan',
-        t: `Transferred ${K(transferAmt)} from your Lender Wallet to ${r.by} (${r.memberCode || 'Member'} · ${r.phone || ''}).`,
+        t: `Transferred ${K(transferAmt)} to ${r.by}'s wallet. Click "Loan Disbursed" with completion date to lock against double disbursement.`,
       });
       pushPrivateNote(db, {
         r: 'admin',
         userId: 'usr-admin',
         category: 'payment',
-        t: `5% Loan Commission: ${K(commission)} credited to Admin wallet from ${K(transferAmt)} loan disbursed by ${lenderUser.name} to ${r.by}.`,
+        t: `5% Loan Commission: ${K(commission)} credited to Admin wallet from ${K(transferAmt)} loan transferred by ${lenderUser.name} to ${r.by}.`,
       });
 
       saveDb();
+      broadcastRealtimeUpdate('loan:transferred', { id: r.id });
+      res.json({ state: buildClientState(db, session) });
+    }
+  );
+
+  app.post(
+    '/api/loans/:id/disburse',
+    requireAuth,
+    requireRole('lender', 'admin'),
+    (req: AuthedRequest, res) => {
+      const db = getDb();
+      const session = req.session!;
+      const id = Number(req.params.id);
+
+      const r = db.lr.find((x) => x.id === id);
+      if (!r || r.st !== 'transferred') {
+        res.status(404).json({ error: 'Transferred loan ready to mark disbursed was not found' });
+        return;
+      }
+      if (session.role === 'lender' && r.approvedByUserId && r.approvedByUserId !== session.userId) {
+        res.status(403).json({
+          error: `Only ${r.lenderName || 'the approving lender'} can finalize disbursement.`,
+        });
+        return;
+      }
+
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const defaultCompletionIso = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10);
+      const disbursedDate =
+        typeof req.body?.disbursedDate === 'string' && req.body.disbursedDate.trim()
+          ? req.body.disbursedDate.trim()
+          : todayIso;
+      const completionDate =
+        typeof req.body?.completionDate === 'string' && req.body.completionDate.trim()
+          ? req.body.completionDate.trim()
+          : defaultCompletionIso;
+
+      const amt = r.disbursedAmt || r.amt;
+      const commission = r.commissionAmt ?? Math.round(amt * 0.05);
+      const net = r.netAmt ?? amt - commission;
+
+      r.st = 'disbursed';
+      r.disbursedDate = disbursedDate;
+      r.completionDate = completionDate;
+      db.lent += amt;
+
+      const loanRecordId = `#LN-${String(db.loans.length + 1).padStart(3, '0')}`;
+      db.loans.unshift({
+        id: loanRecordId,
+        requestId: r.id,
+        amt,
+        commissionAmt: commission,
+        netAmt: net,
+        st: 'Active',
+        lender: r.lender || ME,
+        lenderId: r.approvedByUserId || session.userId,
+        lenderName: r.lenderName || session.name,
+        who: r.by,
+        memberCode: r.memberCode,
+        phone: r.phone,
+        pid: r.pid,
+        gn: r.gn,
+        disbursedDate,
+        completionDate,
+      });
+
+      const lendersDb = getLendersDb();
+      for (const lu of lendersDb.users) {
+        pushPrivateNote(db, {
+          r: 'lender',
+          userId: lu.id,
+          category: 'loan',
+          t: `Loan Disbursed Notice: ${r.by} (${r.memberCode || 'Member'}) loan of ${K(amt)} was disbursed on ${disbursedDate} by ${r.lenderName || session.name} (Completes: ${completionDate}).`,
+        });
+      }
+
+      const membersDb = getMembersDb();
+      const targetMember =
+        (r.userId ? membersDb.users.find((u) => u.id === r.userId) : undefined) ||
+        findUserByMemberName(r.by);
+      pushPrivateNote(db, {
+        r: 'member',
+        userId: targetMember?.id,
+        category: 'loan',
+        t: `Loan ${loanRecordId} of ${K(amt)} marked disbursed on ${disbursedDate}. Agreed completion date: ${completionDate}.`,
+      });
+
+      saveDb();
+      broadcastRealtimeUpdate('loan:disbursed', { id: r.id });
+      res.json({ state: buildClientState(db, session) });
+    }
+  );
+
+  app.post(
+    '/api/loans/:loanId/complete',
+    requireAuth,
+    requireRole('lender', 'admin'),
+    (req: AuthedRequest, res) => {
+      const db = getDb();
+      const session = req.session!;
+      const loanId = decodeURIComponent(req.params.loanId);
+      const loan = db.loans.find((l) => l.id === loanId);
+      if (!loan) {
+        res.status(404).json({ error: 'Loan record not found' });
+        return;
+      }
+      if (
+        session.role === 'lender' &&
+        loan.lenderId &&
+        loan.lenderId !== session.userId &&
+        loan.lenderName !== session.name
+      ) {
+        res.status(403).json({ error: 'Only the originating lender can mark this loan repaid' });
+        return;
+      }
+      loan.st = 'Paid';
+      saveDb();
+      broadcastRealtimeUpdate('loan:completed', { loanId });
       res.json({ state: buildClientState(db, session) });
     }
   );

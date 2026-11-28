@@ -83,6 +83,35 @@ export default function App() {
     };
   }, [syncServerState]);
 
+  // Real-time Server-Sent Events sync for authenticated sessions (loan requests, approvals, transfers, disbursements)
+  useEffect(() => {
+    if (!state.role) return;
+    let active = true;
+    const es = new EventSource('/api/events');
+    es.onmessage = (event) => {
+      if (!active) return;
+      try {
+        const parsed = JSON.parse(event.data) as { type?: string };
+        if (parsed?.type && parsed.type !== 'connected') {
+          api
+            .fetchState()
+            .then((next) => {
+              if (active) syncServerState(next);
+            })
+            .catch(() => {
+              // Ignore transient SSE refresh errors (e.g., if session just signed out)
+            });
+        }
+      } catch {
+        // Ignore malformed SSE payloads
+      }
+    };
+    return () => {
+      active = false;
+      es.close();
+    };
+  }, [state.role, syncServerState]);
+
   // Evaluate local price alerts whenever catalog prices update
   useEffect(() => {
     const { alerts, newlyTriggered } = evaluatePriceAlerts(state.products);
@@ -437,11 +466,13 @@ export default function App() {
       gn?: string;
       ctx: string;
       phone?: string;
+      memberName?: string;
+      memberCode?: string;
     }): Promise<string | void> => {
       try {
         const next = await api.requestLoan(payload);
         syncServerState(next);
-        showToast('Loan request posted globally to all Buyoll lenders');
+        showToast('Loan request posted in real time to Lender Dashboard');
       } catch (err) {
         return err instanceof Error ? err.message : 'Loan request failed';
       }
@@ -450,17 +481,56 @@ export default function App() {
   );
 
   const handleDecideLoan = useCallback(
-    async (id: number, approve: boolean, amount?: number) => {
+    async (id: number, approve: boolean) => {
       try {
-        const next = await api.decideLoan(id, approve, amount);
+        const next = await api.decideLoan(id, approve);
         syncServerState(next);
         showToast(
           approve
-            ? 'Loan transferred to borrower wallet (5% commission credited to Admin)!'
-            : 'Loan declined'
+            ? 'Loan approved — Borrower Wallet unlocked for transfer!'
+            : 'Loan declined (remains open for other available lenders)'
         );
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Action failed');
+      }
+    },
+    [showToast, syncServerState]
+  );
+
+  const handleTransferLoan = useCallback(
+    async (id: number, amount: number) => {
+      try {
+        const next = await api.transferLoan(id, amount);
+        syncServerState(next);
+        showToast(`Transferred ${K(amount)} to borrower wallet!`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Transfer failed');
+      }
+    },
+    [showToast, syncServerState]
+  );
+
+  const handleDisburseLoan = useCallback(
+    async (id: number, disbursedDate: string, completionDate: string) => {
+      try {
+        const next = await api.disburseLoan(id, disbursedDate, completionDate);
+        syncServerState(next);
+        showToast('Loan marked Disbursed — locked against double disbursement!');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Disbursement confirmation failed');
+      }
+    },
+    [showToast, syncServerState]
+  );
+
+  const handleCompleteLoan = useCallback(
+    async (loanId: string) => {
+      try {
+        const next = await api.completeLoan(loanId);
+        syncServerState(next);
+        showToast('Loan marked repaid & closed');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Completion update failed');
       }
     },
     [showToast, syncServerState]
@@ -636,8 +706,14 @@ export default function App() {
             onRotateGroup={(pid, gn) => void handleRotateGroup(pid, gn)}
             onCopyLedger={handleCopyLedger}
             onOpenDeposit={() => setModal({ type: 'deposit' })}
-            onOpenLoanModal={(lenderId) => setModal({ type: 'loan', lenderId })}
-            onDecideLoan={(id, approve, amount) => void handleDecideLoan(id, approve, amount)}
+            onOpenLoanModal={(lenderId, pid, gn) =>
+              setModal({ type: 'loan', lenderId, pid, gn })
+            }
+            onDecideLoan={(id, approve) => void handleDecideLoan(id, approve)}
+            onTransferLoan={(id, amount) => void handleTransferLoan(id, amount)}
+            onDisburseLoan={(id, disbursedDate, completionDate) =>
+              void handleDisburseLoan(id, disbursedDate, completionDate)
+            }
             onOpenProductAI={(pid) => setAiProductId(pid)}
             onOpenOnboarding={(pid) => setOnboardingProductId(pid)}
             priceAlerts={priceAlerts}
@@ -683,7 +759,12 @@ export default function App() {
             state={state}
             onGo={go}
             onOpenDeposit={() => setModal({ type: 'deposit' })}
-            onDecideLoan={(id, approve, amount) => void handleDecideLoan(id, approve, amount)}
+            onDecideLoan={(id, approve) => void handleDecideLoan(id, approve)}
+            onTransferLoan={(id, amount) => void handleTransferLoan(id, amount)}
+            onDisburseLoan={(id, disbursedDate, completionDate) =>
+              void handleDisburseLoan(id, disbursedDate, completionDate)
+            }
+            onCompleteLoan={(loanId) => void handleCompleteLoan(loanId)}
             onToggleWishlist={(pid) => void handleToggleWishlist(pid)}
             onRequireAuth={handleRequireAuth}
             onLogout={() => void handleLogout()}
@@ -789,6 +870,8 @@ export default function App() {
         products={state.products}
         myGroups={state.my}
         lenders={state.lenders}
+        memberName={state.name}
+        memberCode={state.memberCode}
         onSubmitDeposit={handleSubmitDeposit}
         onSubmitJoin={(pid, gn, referral) => void handleJoinSubmit(pid, gn, referral)}
         onClearReadNotifications={() => void handleClearReadNotifications()}

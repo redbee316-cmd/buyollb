@@ -787,10 +787,15 @@ export function buildClientState(
     const matchedMember =
       (r.userId ? membersDb.users.find((u) => u.id === r.userId) : undefined) ||
       membersDb.users.find((u) => u.name.toLowerCase() === r.by.toLowerCase());
+    const canSeeBorrowerWallet =
+      session.role === 'admin' ||
+      (r.approvedByUserId && r.approvedByUserId === session.userId) ||
+      (r.userId && r.userId === session.userId);
     return {
       ...r,
       memberCode: r.memberCode || matchedMember?.memberCode || 'BUY-M-000',
       phone: r.phone || matchedMember?.phone || '',
+      borrowerWalletBalance: canSeeBorrowerWallet ? (matchedMember?.wallet ?? 0) : undefined,
       me:
         session.role === 'member' &&
         ((r.userId && r.userId === session.userId) || r.by === session.name)
@@ -905,6 +910,7 @@ export function buildClientState(
     sus: db.sus,
     till: db.till,
     banner: db.banner,
+    currentUserId: session.userId,
     lenderId: currentLender?.lenderId ?? session.lenderId,
     lenders: buildAllLendersList(),
     registeredMembers: membersDb.users.map((u) => u.username),

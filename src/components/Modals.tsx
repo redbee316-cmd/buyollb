@@ -10,7 +10,7 @@ export type ActiveModal =
   | { type: 'deposit' }
   | { type: 'join'; pid: number; gn: string }
   | { type: 'groupPay'; entry: MyGroupEntry }
-  | { type: 'loan'; lenderId: number }
+  | { type: 'loan'; lenderId: number; pid?: number; gn?: string }
   | { type: 'upload' }
   | { type: 'subscribe' }
   | { type: 'promote'; pid: number }
@@ -27,6 +27,8 @@ interface ModalsProps {
   merchantWallet?: number;
   memberWallet?: number;
   loanCredit?: number;
+  memberName?: string;
+  memberCode?: string;
   notifications: NotificationItem[];
   products: Product[];
   myGroups: MyGroupEntry[];
@@ -52,6 +54,8 @@ interface ModalsProps {
     gn?: string;
     ctx: string;
     phone?: string;
+    memberName?: string;
+    memberCode?: string;
   }) => Promise<string | void>;
   onSubmitUpload: (data: {
     n: string;
@@ -84,6 +88,8 @@ export const Modals: React.FC<ModalsProps> = ({
   merchantWallet = 0,
   memberWallet = 0,
   loanCredit = 0,
+  memberName = '',
+  memberCode = '',
   notifications,
   products,
   myGroups,
@@ -119,7 +125,9 @@ export const Modals: React.FC<ModalsProps> = ({
   const [loanAmt, setLoanAmt] = useState('');
   const [loanCtx, setLoanCtx] = useState('');
   const [loanGroupKey, setLoanGroupKey] = useState('');
+  const [loanBorrowerName, setLoanBorrowerName] = useState('');
   const [loanPhone, setLoanPhone] = useState('');
+  const [loanMemberCode, setLoanMemberCode] = useState('');
   const [loanPreferredLender, setLoanPreferredLender] = useState(0);
 
   const [upName, setUpName] = useState('');
@@ -158,12 +166,18 @@ export const Modals: React.FC<ModalsProps> = ({
     setLoanAmt('');
     setLoanCtx('');
     if (modal?.type === 'loan') {
+      const requestedKey =
+        modal.pid && modal.gn ? `${modal.pid}:${modal.gn}` : '';
       const firstActive = myGroups.find((m) => m.st === 'ok');
-      setLoanGroupKey(firstActive ? `${firstActive.pid}:${firstActive.g}` : '');
+      setLoanGroupKey(requestedKey || (firstActive ? `${firstActive.pid}:${firstActive.g}` : ''));
       setLoanPreferredLender(modal.lenderId || 0);
+      setLoanBorrowerName(memberName || '');
+      setLoanMemberCode(memberCode || '');
     } else {
       setLoanGroupKey('');
       setLoanPreferredLender(0);
+      setLoanBorrowerName('');
+      setLoanMemberCode('');
     }
     setLoanPhone('');
     setUpName('');
@@ -665,23 +679,23 @@ export const Modals: React.FC<ModalsProps> = ({
         return (
           <>
             <div className="row sp" style={{ marginBottom: '6px' }}>
-              <h3>Request a Group Loan</h3>
+              <h3>Post a Loan Request</h3>
               <button type="button" className="btn o sm" onClick={onClose}>
                 ✕
               </button>
             </div>
             <p className="mu" style={{ marginBottom: '8px' }}>
-              Your request appears globally on the <b>Lender Dashboard</b> for all Buyoll lenders.
-              Lenders inspect your active group (read-only), verify KYC &amp; repayment terms with
-              you outside Buyoll, and transfer funds to your Member Wallet.
+              Your loan request posts to the <b>Lender Dashboard</b> in real time. A lender will
+              inspect your group (read-only), call you outside Buyoll to agree terms &amp; interest,
+              and approve or decline. Only one lender can lend to you at a time.
             </p>
 
             {activeMy.length === 0 ? (
               <div className="card" style={{ background: '#fff5f5', borderColor: '#fecaca' }}>
                 <b>Join an active group first</b>
                 <p className="mu" style={{ marginTop: '4px' }}>
-                  Lenders require a group link to inspect your active group before disbursing a
-                  loan. Join any product group first, then request your loan.
+                  Lenders require an active group link to inspect your contributions before
+                  approving a loan. Join any product group first, then post your loan request.
                 </p>
               </div>
             ) : (
@@ -699,20 +713,39 @@ export const Modals: React.FC<ModalsProps> = ({
                   })}
                 </select>
 
-                <label className="mu">Your Phone Number (for Lender KYC outside Buyoll)</label>
-                <input
-                  placeholder="e.g. 0712345678"
-                  value={loanPhone}
-                  onChange={(e) => setLoanPhone(e.target.value)}
-                />
-
-                <label className="mu">Requested Loan Amount (KSh)</label>
+                <label className="mu">Amount Needed (KSh)</label>
                 <input
                   type="number"
-                  placeholder="Amount (e.g. 1500)"
+                  placeholder="How much do you need? e.g. 1500"
                   value={loanAmt}
                   onChange={(e) => setLoanAmt(e.target.value)}
                 />
+
+                <label className="mu">Your Full Name</label>
+                <input
+                  placeholder="Enter your name"
+                  value={loanBorrowerName}
+                  onChange={(e) => setLoanBorrowerName(e.target.value)}
+                />
+
+                <div className="row" style={{ gap: '8px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="mu">Mobile Number</label>
+                    <input
+                      placeholder="e.g. 0712345678"
+                      value={loanPhone}
+                      onChange={(e) => setLoanPhone(e.target.value)}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label className="mu">Member Code</label>
+                    <input
+                      placeholder="e.g. BUY-M-001"
+                      value={loanMemberCode}
+                      onChange={(e) => setLoanMemberCode(e.target.value)}
+                    />
+                  </div>
+                </div>
 
                 <label className="mu">Preferred Lender (Optional — all lenders see request)</label>
                 <select
@@ -727,9 +760,9 @@ export const Modals: React.FC<ModalsProps> = ({
                   ))}
                 </select>
 
-                <label className="mu">Note / Repayment Plan Summary (Optional)</label>
+                <label className="mu">Note / Purpose (Optional)</label>
                 <input
-                  placeholder="e.g. For 5 daily installments in Group J"
+                  placeholder="e.g. For daily installments in Group J"
                   value={loanCtx}
                   onChange={(e) => setLoanCtx(e.target.value)}
                 />
@@ -738,10 +771,10 @@ export const Modals: React.FC<ModalsProps> = ({
                   className="card mu"
                   style={{ background: '#fff7ed', borderColor: '#fed7aa', marginBottom: '10px' }}
                 >
-                  <b>5% Platform Commission:</b> Deducted once on disbursement (
+                  <b>5% Platform Commission:</b> Deducted once when transferred (
                   <b>{K(feePreview)}</b> fee → <b>{K(Math.max(0, numericAmt - feePreview))}</b> net
-                  credited). Borrowed funds <b>cannot be withdrawn</b> and can only pay installments
-                  for your active groups.
+                  credited to your Member Wallet). Loan repayment happens outside Buyoll per your
+                  agreement with the lender.
                 </div>
 
                 <button
@@ -751,12 +784,20 @@ export const Modals: React.FC<ModalsProps> = ({
                       onToast('Select an active group');
                       return;
                     }
-                    if (loanPhone.trim().length < 7) {
-                      onToast('Enter your phone number for lender KYC');
-                      return;
-                    }
                     if (!numericAmt || numericAmt <= 50) {
                       onToast('Enter an amount above KSh 50');
+                      return;
+                    }
+                    if (loanBorrowerName.trim().length < 2) {
+                      onToast('Enter your name');
+                      return;
+                    }
+                    if (loanPhone.trim().length < 7) {
+                      onToast('Enter your mobile number');
+                      return;
+                    }
+                    if (loanMemberCode.trim().length < 3) {
+                      onToast('Enter your member code');
                       return;
                     }
                     const [pidStr, gn] = loanGroupKey.split(':');
@@ -769,6 +810,8 @@ export const Modals: React.FC<ModalsProps> = ({
                       pid: pidNum,
                       gn,
                       phone: loanPhone.trim(),
+                      memberName: loanBorrowerName.trim(),
+                      memberCode: loanMemberCode.trim().toUpperCase(),
                       ctx: loanCtx.trim() || defaultCtx,
                     });
                     if (err) {
@@ -778,7 +821,7 @@ export const Modals: React.FC<ModalsProps> = ({
                     onClose();
                   }}
                 >
-                  Post Loan Request to Lenders
+                  Post Loan Request
                 </button>
               </>
             )}

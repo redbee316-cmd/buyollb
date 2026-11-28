@@ -271,18 +271,35 @@ export const api = {
     gn?: string;
     ctx: string;
     phone?: string;
+    memberName?: string;
+    memberCode?: string;
   }) =>
     apiFetch<{ state: AppState }>('/api/loans/request', {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((r) => r.state),
 
-  decideLoan: (id: number, approve: boolean, amount?: number) =>
+  decideLoan: (id: number, approve: boolean) =>
     apiFetch<{ state: AppState }>(`/api/loans/${id}/decide`, {
       method: 'POST',
-      body: JSON.stringify(
-        typeof amount === 'number' && amount > 0 ? { approve, amount } : { approve }
-      ),
+      body: JSON.stringify({ approve }),
+    }).then((r) => r.state),
+
+  transferLoan: (id: number, amount: number) =>
+    apiFetch<{ state: AppState }>(`/api/loans/${id}/transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ amount }),
+    }).then((r) => r.state),
+
+  disburseLoan: (id: number, disbursedDate: string, completionDate: string) =>
+    apiFetch<{ state: AppState }>(`/api/loans/${id}/disburse`, {
+      method: 'POST',
+      body: JSON.stringify({ disbursedDate, completionDate }),
+    }).then((r) => r.state),
+
+  completeLoan: (loanId: string) =>
+    apiFetch<{ state: AppState }>(`/api/loans/${encodeURIComponent(loanId)}/complete`, {
+      method: 'POST',
     }).then((r) => r.state),
 
   subscribePlan: (planIndex: number) =>

@@ -159,6 +159,13 @@ export interface DepositItem {
   reason?: string;
 }
 
+export type LoanRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'transferred'
+  | 'disbursed'
+  | 'declined';
+
 export interface LoanRequest {
   id: number;
   userId?: string;
@@ -170,21 +177,31 @@ export interface LoanRequest {
   lender: number;
   pid?: number;
   gn?: string;
-  st: 'pending' | 'approved' | 'declined';
+  st: LoanRequestStatus;
   ctx: string;
   score: number;
   loc: string;
+  createdAt?: string;
+  declinedBy?: string[];
+  approvedByUserId?: string;
+  approvedAt?: string;
+  borrowerWalletBalance?: number;
   disbursedAmt?: number;
   commissionAmt?: number;
   netAmt?: number;
+  transferredAt?: string;
+  disbursedDate?: string;
+  completionDate?: string;
   lenderName?: string;
 }
 
 export interface LoanItem {
   id: string;
+  requestId?: number;
   amt: number;
   st: 'Active' | 'Paid';
   lender: number;
+  lenderId?: string;
   lenderName?: string;
   who: string;
   memberCode?: string;
@@ -193,6 +210,8 @@ export interface LoanItem {
   gn?: string;
   commissionAmt?: number;
   netAmt?: number;
+  disbursedDate?: string;
+  completionDate?: string;
 }
 
 export type RevenueCategory =
@@ -254,6 +273,7 @@ export interface AppState {
   sus: string[];
   till: string;
   banner: string;
+  currentUserId?: string;
   lenderId?: number;
   lenders?: LenderInfo[];
   registeredMembers?: string[];
