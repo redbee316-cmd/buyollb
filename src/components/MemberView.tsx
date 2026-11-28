@@ -1,6 +1,7 @@
 import React from 'react';
-import { Heart, Search, Sparkles } from 'lucide-react';
+import { Heart, HelpCircle, Search, Sparkles } from 'lucide-react';
 import { LN } from '../utils/defaults';
+import { MemberPaymentProgressChart } from './MemberPaymentProgressChart';
 import type { AppState, MyGroupEntry, Product, ProductGroup, Tab } from '../types/buyoll';
 import {
   CATS,
@@ -57,6 +58,7 @@ interface MemberViewProps {
   onOpenLoanModal: (lenderId: number) => void;
   onDecideLoan?: (id: number, approve: boolean, amount?: number) => void;
   onOpenProductAI: (pid: number) => void;
+  onOpenOnboarding: (pid: number) => void;
   onShowReport: () => void;
   onLogout: () => void;
   onReset: () => void;
@@ -86,6 +88,7 @@ export const MemberView: React.FC<MemberViewProps> = ({
   onOpenLoanModal,
   onDecideLoan,
   onOpenProductAI,
+  onOpenOnboarding,
   onShowReport,
   onLogout,
   onReset,
@@ -203,20 +206,34 @@ export const MemberView: React.FC<MemberViewProps> = ({
                 <span className="old">{K(p.o)}</span>{' '}
                 {discount > 0 && <span className="bd r">-{discount}% OFF</span>}
               </div>
-              <button
-                type="button"
-                className={`btn sm ${saved ? '' : 'o'}`}
-                onClick={() => {
-                  if (!state.role) {
-                    onRequireAuth('member-login', 'Log in or register to save items to your Wishlist');
-                    return;
-                  }
-                  onToggleWishlist(p.id);
-                }}
-              >
-                <Heart size={15} fill={saved ? '#fff' : 'none'} />
-                {saved ? 'Saved in Wishlist' : 'Save to Wishlist'}
-              </button>
+              <div className="row" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                <button
+                  type="button"
+                  className="btn o sm"
+                  onClick={() => onOpenOnboarding(p.id)}
+                  style={{
+                    borderColor: '#fed7aa',
+                    background: '#fff7ed',
+                    color: '#c2410c',
+                  }}
+                >
+                  <HelpCircle size={14} /> How Chamaa Works
+                </button>
+                <button
+                  type="button"
+                  className={`btn sm ${saved ? '' : 'o'}`}
+                  onClick={() => {
+                    if (!state.role) {
+                      onRequireAuth('member-login', 'Log in or register to save items to your Wishlist');
+                      return;
+                    }
+                    onToggleWishlist(p.id);
+                  }}
+                >
+                  <Heart size={15} fill={saved ? '#fff' : 'none'} />
+                  {saved ? 'Saved in Wishlist' : 'Save to Wishlist'}
+                </button>
+              </div>
             </div>
             <h2 style={{ fontSize: '22px', margin: '8px 0' }}>{p.n}</h2>
             <p className="mu">
@@ -1064,6 +1081,7 @@ export const MemberView: React.FC<MemberViewProps> = ({
         onGo={onGo}
         onToggleWishlist={onToggleWishlist}
         onViewProduct={(pid) => onGo('home', 'prod', pid)}
+        onOpenOnboarding={onOpenOnboarding}
       />
     );
   }
@@ -1099,6 +1117,12 @@ export const MemberView: React.FC<MemberViewProps> = ({
         >
           📄 View Transactions Report
         </button>
+        <MemberPaymentProgressChart
+          state={state}
+          onOpenGroups={() => onGo('groups')}
+          onOpenTrack={(pid, gn) => onGo('groups', 'track', `${pid}:${gn}`)}
+          onOpenPayModal={onOpenGroupPayModal}
+        />
         <div className="ban row" style={{ padding: '12px', marginTop: '12px' }}>
           🎁{' '}
           <div>
@@ -1220,6 +1244,16 @@ export const MemberView: React.FC<MemberViewProps> = ({
                     <div className="text-[12px] font-bold leading-tight line-clamp-1">{p.n}</div>
                     <div className="text-[12px] font-extrabold text-[#fd384f]">{K(p.p)}</div>
                     <div className="text-[10px] text-[#757575] truncate">🏪 {p.m}</div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenOnboarding(p.id);
+                      }}
+                      className="mt-0.5 text-[11px] font-bold text-[#c2410c] bg-[#fff7ed] border border-[#fed7aa] rounded-md py-1 px-2 cursor-pointer inline-flex items-center justify-center gap-1"
+                    >
+                      <HelpCircle size={11} /> How Groups Work
+                    </button>
                   </div>
                 ))}
               </div>
@@ -1264,6 +1298,16 @@ export const MemberView: React.FC<MemberViewProps> = ({
                         )}
                       </div>
                       <div className="text-[10px] text-[#757575] truncate">🏪 {p.m}</div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenOnboarding(p.id);
+                        }}
+                        className="mt-0.5 text-[11px] font-bold text-[#c2410c] bg-[#fff7ed] border border-[#fed7aa] rounded-md py-1 px-2 cursor-pointer inline-flex items-center justify-center gap-1"
+                      >
+                        <HelpCircle size={11} /> How Groups Work
+                      </button>
                     </div>
                   );
                 })}
@@ -1293,31 +1337,39 @@ export const MemberView: React.FC<MemberViewProps> = ({
         </div>
       </div>
 
-      {/* Private Member Wallet & Wishlist moved into Member's individual dashboard */}
+      {/* Private Member Dashboard: Wallet, Quick Actions & Payment Progress Over Time */}
       {state.role === 'member' && (
-        <div className="card row sp" style={{ flexWrap: 'wrap', gap: '10px', marginTop: '12px' }}>
-          <div>
-            <div className="mu">Private Member Dashboard</div>
-            <b style={{ fontSize: '20px', color: '#191919' }}>{K(state.wallet)}</b>
+        <>
+          <div className="card row sp" style={{ flexWrap: 'wrap', gap: '10px', marginTop: '12px' }}>
+            <div>
+              <div className="mu">Private Member Dashboard</div>
+              <b style={{ fontSize: '20px', color: '#191919' }}>{K(state.wallet)}</b>
+            </div>
+            <div className="row" style={{ flexWrap: 'wrap' }}>
+              <button type="button" className="btn y sm" onClick={() => onGo('wallet')}>
+                👛 My Wallet
+              </button>
+              <button type="button" className="btn o sm" onClick={() => onGo('wishlist')}>
+                ❤️ Wishlist ({wishlistIds.length})
+              </button>
+              <button type="button" className="btn o sm" onClick={() => onGo('wallet', 'mine')}>
+                👥 My Groups ({state.my.length})
+              </button>
+              <button type="button" className="btn o sm" onClick={() => onGo('wallet', 'loans')}>
+                🤝 Loans
+              </button>
+              <button type="button" className="btn o sm" onClick={onOpenDeposit}>
+                ⬆ Deposit
+              </button>
+            </div>
           </div>
-          <div className="row" style={{ flexWrap: 'wrap' }}>
-            <button type="button" className="btn y sm" onClick={() => onGo('wallet')}>
-              👛 My Wallet
-            </button>
-            <button type="button" className="btn o sm" onClick={() => onGo('wishlist')}>
-              ❤️ Wishlist ({wishlistIds.length})
-            </button>
-            <button type="button" className="btn o sm" onClick={() => onGo('wallet', 'mine')}>
-              👥 My Groups ({state.my.length})
-            </button>
-            <button type="button" className="btn o sm" onClick={() => onGo('wallet', 'loans')}>
-              🤝 Loans
-            </button>
-            <button type="button" className="btn o sm" onClick={onOpenDeposit}>
-              ⬆ Deposit
-            </button>
-          </div>
-        </div>
+          <MemberPaymentProgressChart
+            state={state}
+            onOpenGroups={() => onGo('groups')}
+            onOpenTrack={(pid, gn) => onGo('groups', 'track', `${pid}:${gn}`)}
+            onOpenPayModal={onOpenGroupPayModal}
+          />
+        </>
       )}
 
       <div className="row sp" style={{ margin: '14px 0 8px', flexWrap: 'wrap', gap: '8px' }}>
@@ -1435,11 +1487,32 @@ export const MemberView: React.FC<MemberViewProps> = ({
                       marginTop: '8px',
                       paddingTop: '8px',
                       borderTop: '1px solid #f1f1f1',
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: '6px',
                     }}
                   >
                     <button
                       type="button"
-                      className="btn o sm bl"
+                      className="btn o sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenOnboarding(p.id);
+                      }}
+                      style={{
+                        borderColor: '#e2e8f0',
+                        background: '#f8fafc',
+                        color: '#334155',
+                        fontSize: '11.5px',
+                        fontWeight: 700,
+                        padding: '6px 8px',
+                      }}
+                    >
+                      <HelpCircle size={13} /> Guide
+                    </button>
+                    <button
+                      type="button"
+                      className="btn o sm"
                       onClick={(e) => {
                         e.stopPropagation();
                         onOpenProductAI(p.id);
@@ -1448,11 +1521,12 @@ export const MemberView: React.FC<MemberViewProps> = ({
                         borderColor: '#fed7aa',
                         background: '#fff7ed',
                         color: '#c2410c',
-                        fontSize: '12px',
+                        fontSize: '11.5px',
                         fontWeight: 700,
+                        padding: '6px 8px',
                       }}
                     >
-                      <Sparkles size={13} /> Ask Buyoll.AI
+                      <Sparkles size={13} /> Buyoll.AI
                     </button>
                   </div>
                 </div>

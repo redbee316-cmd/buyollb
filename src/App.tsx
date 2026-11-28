@@ -7,6 +7,7 @@ import { AuthModalMode, LoginView } from './components/LoginView';
 import { MemberView } from './components/MemberView';
 import { MerchantView } from './components/MerchantView';
 import { ActiveModal, Modals } from './components/Modals';
+import { OnboardingModal } from './components/OnboardingModal';
 import { ProductAIModal } from './components/ProductAIModal';
 import { SearchModal } from './components/SearchModal';
 import { BottomNav, Header } from './components/SharedViews';
@@ -20,6 +21,7 @@ export default function App() {
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [aiProductId, setAiProductId] = useState<number | null>(null);
+  const [onboardingProductId, setOnboardingProductId] = useState<number | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -580,6 +582,7 @@ export default function App() {
             onOpenLoanModal={(lenderId) => setModal({ type: 'loan', lenderId })}
             onDecideLoan={(id, approve, amount) => void handleDecideLoan(id, approve, amount)}
             onOpenProductAI={(pid) => setAiProductId(pid)}
+            onOpenOnboarding={(pid) => setOnboardingProductId(pid)}
             onShowReport={() => showToast(`Report: ${state.tx.length} transactions`)}
             onLogout={() => void handleLogout()}
             onReset={() => void handleReset()}
@@ -608,6 +611,7 @@ export default function App() {
             onUpdateProductTill={(pid, till) => void handleUpdateProductTill(pid, till)}
             onDecideGroupPayment={(id, approve) => void handleDecideGroupPayment(id, approve)}
             onOpenProductAI={(pid) => setAiProductId(pid)}
+            onOpenOnboarding={(pid) => setOnboardingProductId(pid)}
             onToast={showToast}
             onRequireAuth={handleRequireAuth}
             onLogout={() => void handleLogout()}
@@ -762,6 +766,28 @@ export default function App() {
         onClose={() => setAiProductId(null)}
         onGoToPlans={(pid) => go('home', 'prod', pid)}
         onToast={showToast}
+      />
+
+      <OnboardingModal
+        product={state.products.find((p) => p.id === onboardingProductId) || null}
+        role={state.role}
+        myGroups={state.my}
+        onClose={() => setOnboardingProductId(null)}
+        onJoinGroup={(pid, gn) => {
+          if (!state.role) {
+            handleRequireAuth(
+              'member-register',
+              'Register or log in as a Member to join your first group'
+            );
+            return;
+          }
+          if (state.role !== 'member') {
+            go('home', 'prod', pid);
+            return;
+          }
+          setModal({ type: 'join', pid, gn });
+        }}
+        onViewProduct={(pid) => go('home', 'prod', pid)}
       />
 
       {toastMsg && <div id="toast">{toastMsg}</div>}

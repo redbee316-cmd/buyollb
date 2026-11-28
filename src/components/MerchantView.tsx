@@ -15,6 +15,7 @@ interface MerchantViewProps {
   onUpdateProductTill: (pid: number, till: string) => void;
   onDecideGroupPayment: (paymentId: number, approve: boolean) => void;
   onOpenProductAI: (pid: number) => void;
+  onOpenOnboarding: (pid: number) => void;
   onToast: (msg: string) => void;
   onRequireAuth: (mode: AuthModalMode, msg?: string) => void;
   onLogout: () => void;
@@ -32,6 +33,7 @@ export const MerchantView: React.FC<MerchantViewProps> = ({
   onUpdateProductTill,
   onDecideGroupPayment,
   onOpenProductAI,
+  onOpenOnboarding,
   onToast,
   onRequireAuth,
   onLogout,
@@ -210,6 +212,13 @@ export const MerchantView: React.FC<MerchantViewProps> = ({
             onClick={() => onOpenProductAI(p.id)}
           >
             ✨ AI Insights
+          </button>
+          <button
+            type="button"
+            className="btn sm o"
+            onClick={() => onOpenOnboarding(p.id)}
+          >
+            ❓ Chamaa Guide
           </button>
         </div>
       </div>

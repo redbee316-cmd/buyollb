@@ -50,7 +50,8 @@ function isSafeImg(url?: string): boolean {
   return (
     url.startsWith('/uploads/') ||
     url.startsWith('/assets/') ||
-    url.startsWith('data:image/')
+    url.startsWith('data:image/') ||
+    url.startsWith('https://picsum.photos/')
   );
 }
 
@@ -374,7 +375,8 @@ export const WishlistView: React.FC<{
   onGo: (tab: Tab, view?: string | null, sel?: string | number | null) => void;
   onToggleWishlist: (pid: number) => void;
   onViewProduct: (pid: number) => void;
-}> = ({ state, onGo, onToggleWishlist, onViewProduct }) => {
+  onOpenOnboarding?: (pid: number) => void;
+}> = ({ state, onGo, onToggleWishlist, onViewProduct, onOpenOnboarding }) => {
   const wishlistIds = state.wishlist || [];
   const savedSet = new Set(wishlistIds);
   const visibleProducts = state.products.filter(
@@ -439,6 +441,15 @@ export const WishlistView: React.FC<{
                   >
                     View Product &amp; Groups
                   </button>
+                  {onOpenOnboarding && (
+                    <button
+                      type="button"
+                      className="btn o sm"
+                      onClick={() => onOpenOnboarding(p.id)}
+                    >
+                      Guide
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn o sm"
