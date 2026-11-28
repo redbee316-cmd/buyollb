@@ -3,6 +3,7 @@ import { Heart } from 'lucide-react';
 import type { AppState, Product, Role, Tab } from '../types/buyoll';
 import { K, dc } from '../utils/format';
 import type { AuthModalMode } from './LoginView';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export const NAV_ITEMS: Record<Role, Array<[Tab, string, string]>> = {
   member: [
@@ -176,6 +177,7 @@ export const Header: React.FC<{
           flexShrink: 0,
         }}
       >
+        <PWAInstallButton />
         <button
           type="button"
           className="bell"

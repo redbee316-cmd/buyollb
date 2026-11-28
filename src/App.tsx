@@ -8,6 +8,7 @@ import { MemberView } from './components/MemberView';
 import { MerchantView } from './components/MerchantView';
 import { ActiveModal, Modals } from './components/Modals';
 import { OnboardingModal } from './components/OnboardingModal';
+import { OfflineIndicator } from './components/PWAInstallButton';
 import { ProductAIModal } from './components/ProductAIModal';
 import { SearchModal } from './components/SearchModal';
 import { BottomNav, Header } from './components/SharedViews';
@@ -789,6 +790,8 @@ export default function App() {
         }}
         onViewProduct={(pid) => go('home', 'prod', pid)}
       />
+
+      <OfflineIndicator />
 
       {toastMsg && <div id="toast">{toastMsg}</div>}
     </div>
