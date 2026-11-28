@@ -9,10 +9,19 @@ import { MerchantView } from './components/MerchantView';
 import { ActiveModal, Modals } from './components/Modals';
 import { OnboardingModal } from './components/OnboardingModal';
 import { OfflineIndicator } from './components/PWAInstallButton';
+import { PriceAlertModal } from './components/PriceAlertModal';
 import { ProductAIModal } from './components/ProductAIModal';
 import { SearchModal } from './components/SearchModal';
 import { BottomNav, Header } from './components/SharedViews';
 import { defState, type PromoTierId } from './utils/defaults';
+import {
+  type PriceAlert,
+  dismissTriggeredAlert,
+  evaluatePriceAlerts,
+  loadPriceAlerts,
+  removePriceAlert,
+  upsertPriceAlert,
+} from './utils/priceAlerts';
 import type { AppState, MyGroupEntry, Product, Tab } from './types/buyoll';
 import { K, inst } from './utils/format';
 
@@ -23,6 +32,8 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [aiProductId, setAiProductId] = useState<number | null>(null);
   const [onboardingProductId, setOnboardingProductId] = useState<number | null>(null);
+  const [priceAlertProductId, setPriceAlertProductId] = useState<number | null>(null);
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => loadPriceAlerts());
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -71,6 +82,20 @@ export default function App() {
       active = false;
     };
   }, [syncServerState]);
+
+  // Evaluate local price alerts whenever catalog prices update
+  useEffect(() => {
+    const { alerts, newlyTriggered } = evaluatePriceAlerts(state.products);
+    setPriceAlerts(alerts);
+    if (newlyTriggered.length > 0) {
+      const first = newlyTriggered[0];
+      const msg =
+        newlyTriggered.length === 1
+          ? `Price drop alert: ${first.productName} is now ${K(first.triggeredPrice ?? first.targetPrice)}!`
+          : `${newlyTriggered.length} items dropped to your target price! Check Notifications.`;
+      showToast(msg);
+    }
+  }, [state.products, showToast]);
 
   const merchants = useMemo(
     () => [...new Set(state.products.map((p) => p.m))],
@@ -530,9 +555,40 @@ export default function App() {
     [state.role, handleRequireAuth, showToast, syncServerState]
   );
 
-  const unreadCount = state.role
-    ? state.nt.filter((x) => !x.s).length
-    : 0;
+  const handleSavePriceAlert = useCallback(
+    (product: Product, targetPrice: number) => {
+      const next = upsertPriceAlert(product, targetPrice);
+      setPriceAlerts(next);
+      showToast(`Price alert set for ${product.n} at ${K(targetPrice)}`);
+    },
+    [showToast]
+  );
+
+  const handleRemovePriceAlert = useCallback(
+    (productId: number) => {
+      const next = removePriceAlert(productId);
+      setPriceAlerts(next);
+      showToast('Price alert removed');
+    },
+    [showToast]
+  );
+
+  const handleDismissPriceAlert = useCallback((productId: number) => {
+    const next = dismissTriggeredAlert(productId);
+    setPriceAlerts(next);
+  }, []);
+
+  const triggeredPriceAlertCount = useMemo(
+    () =>
+      priceAlerts.filter((a) => {
+        const product = state.products.find((p) => p.id === a.productId);
+        return Boolean(product && product.p <= a.targetPrice && !a.dismissed);
+      }).length,
+    [priceAlerts, state.products]
+  );
+
+  const unreadCount =
+    (state.role ? state.nt.filter((x) => !x.s).length : 0) + triggeredPriceAlertCount;
   const roleNotifications = state.role ? state.nt : [];
 
   return (
@@ -584,6 +640,8 @@ export default function App() {
             onDecideLoan={(id, approve, amount) => void handleDecideLoan(id, approve, amount)}
             onOpenProductAI={(pid) => setAiProductId(pid)}
             onOpenOnboarding={(pid) => setOnboardingProductId(pid)}
+            priceAlerts={priceAlerts}
+            onOpenPriceAlert={(pid) => setPriceAlertProductId(pid)}
             onShowReport={() => showToast(`Report: ${state.tx.length} transactions`)}
             onLogout={() => void handleLogout()}
             onReset={() => void handleReset()}
@@ -741,6 +799,9 @@ export default function App() {
         onSubmitPromote={handlePromoteProduct}
         onConfirmDeclineDeposit={(id, reason) => void handleDecideDeposit(id, false, reason)}
         onOpenDeposit={() => setModal({ type: 'deposit' })}
+        priceAlerts={priceAlerts}
+        onViewPriceAlertProduct={(pid) => go('home', 'prod', pid)}
+        onDismissPriceAlert={handleDismissPriceAlert}
         onToast={showToast}
       />
 
@@ -789,6 +850,16 @@ export default function App() {
           setModal({ type: 'join', pid, gn });
         }}
         onViewProduct={(pid) => go('home', 'prod', pid)}
+      />
+
+      <PriceAlertModal
+        product={state.products.find((p) => p.id === priceAlertProductId) || null}
+        existingAlert={
+          priceAlerts.find((a) => a.productId === priceAlertProductId) || null
+        }
+        onClose={() => setPriceAlertProductId(null)}
+        onSave={handleSavePriceAlert}
+        onRemove={handleRemovePriceAlert}
       />
 
       <OfflineIndicator />

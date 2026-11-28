@@ -1,8 +1,9 @@
 import React from 'react';
-import { Heart, HelpCircle, Search, Sparkles } from 'lucide-react';
+import { Bell, BellRing, Heart, HelpCircle, Search, Sparkles } from 'lucide-react';
 import { LN } from '../utils/defaults';
 import { MemberPaymentProgressChart } from './MemberPaymentProgressChart';
 import type { AppState, MyGroupEntry, Product, ProductGroup, Tab } from '../types/buyoll';
+import type { PriceAlert } from '../utils/priceAlerts';
 import {
   CATS,
   K,
@@ -59,6 +60,8 @@ interface MemberViewProps {
   onDecideLoan?: (id: number, approve: boolean, amount?: number) => void;
   onOpenProductAI: (pid: number) => void;
   onOpenOnboarding: (pid: number) => void;
+  priceAlerts?: PriceAlert[];
+  onOpenPriceAlert: (pid: number) => void;
   onShowReport: () => void;
   onLogout: () => void;
   onReset: () => void;
@@ -89,6 +92,8 @@ export const MemberView: React.FC<MemberViewProps> = ({
   onDecideLoan,
   onOpenProductAI,
   onOpenOnboarding,
+  priceAlerts = [],
+  onOpenPriceAlert,
   onShowReport,
   onLogout,
   onReset,
@@ -164,6 +169,8 @@ export const MemberView: React.FC<MemberViewProps> = ({
     if (!p) return null;
     const discount = dc(p);
     const saved = isWishlisted(p.id);
+    const activeAlert = priceAlerts.find((a) => a.productId === p.id) || null;
+    const alertTriggered = Boolean(activeAlert && p.p <= activeAlert.targetPrice);
     const returnTab: Tab = state.role && state.role !== 'member' ? 'wishlist' : 'home';
     return (
       <>
@@ -215,9 +222,25 @@ export const MemberView: React.FC<MemberViewProps> = ({
                     borderColor: '#fed7aa',
                     background: '#fff7ed',
                     color: '#c2410c',
+                    whiteSpace: 'nowrap',
                   }}
                 >
                   <HelpCircle size={14} /> How Chamaa Works
+                </button>
+                <button
+                  type="button"
+                  className={`btn sm ${activeAlert ? 'y' : 'o'}`}
+                  onClick={() => onOpenPriceAlert(p.id)}
+                  style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
+                >
+                  {activeAlert ? <BellRing size={14} /> : <Bell size={14} />}
+                  <span>
+                    {activeAlert
+                      ? alertTriggered
+                        ? `Target Hit (${K(activeAlert.targetPrice)})`
+                        : `Alert: ${K(activeAlert.targetPrice)}`
+                      : 'Set Price Alert'}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -229,12 +252,38 @@ export const MemberView: React.FC<MemberViewProps> = ({
                     }
                     onToggleWishlist(p.id);
                   }}
+                  style={{ whiteSpace: 'nowrap' }}
                 >
                   <Heart size={15} fill={saved ? '#fff' : 'none'} />
                   {saved ? 'Saved in Wishlist' : 'Save to Wishlist'}
                 </button>
               </div>
             </div>
+            {alertTriggered && activeAlert && (
+              <div
+                className="card row sp"
+                style={{
+                  background: '#ecfdf5',
+                  borderColor: '#86efac',
+                  margin: '10px 0 4px',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ fontSize: '13px', color: '#14532d' }}>
+                  <b>Price drop alert triggered:</b> Now {K(p.p)} (at or below your target{' '}
+                  {K(activeAlert.targetPrice)}).
+                </div>
+                <button
+                  type="button"
+                  className="btn sm o"
+                  onClick={() => onOpenPriceAlert(p.id)}
+                  style={{ whiteSpace: 'nowrap' }}
+                >
+                  Edit Alert
+                </button>
+              </div>
+            )}
             <h2 style={{ fontSize: '22px', margin: '8px 0' }}>{p.n}</h2>
             <p className="mu">
               {p.cat} · {p.stock} in stock

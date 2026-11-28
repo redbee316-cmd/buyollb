@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { LN, PL, PROMO_TIERS, type PromoTierId } from '../utils/defaults';
 import type { LenderInfo, MyGroupEntry, NotificationItem, Product } from '../types/buyoll';
 import { CATS, K, inst } from '../utils/format';
+import type { PriceAlert } from '../utils/priceAlerts';
 
 export type ActiveModal =
   | { type: 'notifications' }
@@ -68,6 +69,9 @@ interface ModalsProps {
   onSubmitPromote: (pid: number, tier: PromoTierId) => Promise<string | void>;
   onConfirmDeclineDeposit: (id: number, reason: string) => void;
   onOpenDeposit?: () => void;
+  priceAlerts?: PriceAlert[];
+  onViewPriceAlertProduct?: (pid: number) => void;
+  onDismissPriceAlert?: (pid: number) => void;
   onToast: (msg: string) => void;
 }
 
@@ -94,6 +98,9 @@ export const Modals: React.FC<ModalsProps> = ({
   onSubmitPromote,
   onConfirmDeclineDeposit,
   onOpenDeposit,
+  priceAlerts = [],
+  onViewPriceAlertProduct,
+  onDismissPriceAlert,
   onToast,
 }) => {
   const [depCode, setDepCode] = useState('');
@@ -188,10 +195,18 @@ export const Modals: React.FC<ModalsProps> = ({
           moderation: '🛡️ Moderator',
           system: '🔔 Alert',
         };
+        const triggeredAlerts = priceAlerts.filter((a) => {
+          const current = products.find((p) => p.id === a.productId);
+          return Boolean(current && current.p <= a.targetPrice && !a.dismissed);
+        });
+        const waitingAlerts = priceAlerts.filter((a) => {
+          const current = products.find((p) => p.id === a.productId);
+          return Boolean(current && current.p > a.targetPrice);
+        });
         return (
           <>
             <div className="row sp" style={{ marginBottom: '6px' }}>
-              <h3>🔔 Private Notifications</h3>
+              <h3>🔔 Notifications &amp; Price Alerts</h3>
               <div className="row" style={{ gap: '6px' }}>
                 {!isGuest && hasRead && (
                   <button
@@ -207,11 +222,98 @@ export const Modals: React.FC<ModalsProps> = ({
                 </button>
               </div>
             </div>
+
+            {triggeredAlerts.length > 0 && (
+              <div style={{ marginBottom: '10px' }}>
+                <div className="mu" style={{ fontWeight: 700, marginBottom: '4px', color: '#166534' }}>
+                  Price Drop Alerts Triggered
+                </div>
+                {triggeredAlerts.map((alert) => {
+                  const current = products.find((p) => p.id === alert.productId);
+                  return (
+                    <div
+                      key={`pa-hit-${alert.productId}`}
+                      className="card"
+                      style={{
+                        background: '#ecfdf5',
+                        borderColor: '#86efac',
+                        margin: '6px 0',
+                        padding: '10px',
+                      }}
+                    >
+                      <div style={{ fontSize: '13px', fontWeight: 700, color: '#14532d' }}>
+                        {alert.productName} dropped to {K(current?.p ?? alert.triggeredPrice ?? alert.targetPrice)}
+                      </div>
+                      <div className="mu" style={{ marginTop: '2px', color: '#166534' }}>
+                        Your target price: {K(alert.targetPrice)}
+                      </div>
+                      <div className="row" style={{ marginTop: '8px', gap: '6px' }}>
+                        {onViewPriceAlertProduct && (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => {
+                              onClose();
+                              onViewPriceAlertProduct(alert.productId);
+                            }}
+                          >
+                            View Product
+                          </button>
+                        )}
+                        {onDismissPriceAlert && (
+                          <button
+                            type="button"
+                            className="btn o sm"
+                            onClick={() => onDismissPriceAlert(alert.productId)}
+                          >
+                            Dismiss
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {waitingAlerts.length > 0 && (
+              <div style={{ marginBottom: '10px' }}>
+                <div className="mu" style={{ fontWeight: 700, marginBottom: '4px' }}>
+                  Watching Prices ({waitingAlerts.length})
+                </div>
+                {waitingAlerts.map((alert) => {
+                  const current = products.find((p) => p.id === alert.productId);
+                  return (
+                    <div key={`pa-wait-${alert.productId}`} className="tx">
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '13px', fontWeight: 600 }}>{alert.productName}</div>
+                        <div className="mu" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                          Current: {K(current?.p ?? alert.priceWhenSet)} · Target: {K(alert.targetPrice)}
+                        </div>
+                      </div>
+                      {onViewPriceAlertProduct && (
+                        <button
+                          type="button"
+                          className="btn o sm"
+                          onClick={() => {
+                            onClose();
+                            onViewPriceAlertProduct(alert.productId);
+                          }}
+                        >
+                          Open
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {isGuest ? (
               <div style={{ paddingTop: '6px' }}>
                 <p className="mu" style={{ marginBottom: '10px' }}>
-                  Notifications on Buyoll are strictly private per account. Register or log in inside{' '}
-                  <b>👤 Profile</b> to see your personal group, payment, loan, and store alerts.
+                  Account notifications on Buyoll are private per account. Register or log in inside{' '}
+                  <b>👤 Profile</b> to see your group, payment, loan, and store alerts.
                 </p>
                 {onGoToProfile && (
                   <button
@@ -246,7 +348,7 @@ export const Modals: React.FC<ModalsProps> = ({
                 ))}
               </div>
             ) : (
-              <p className="mu">No private notifications yet.</p>
+              <p className="mu">No private account notifications yet.</p>
             )}
           </>
         );
